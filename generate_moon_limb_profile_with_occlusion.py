@@ -2,16 +2,12 @@
 """
 generate_moon_limb_profile_with_occlusion.py
 
-Fixed / changed:
- - Correct angular-offset computation (observer -> surface vs observer -> moon center)
- - Avoids infinite/tiny numerical issues and clamps insane pixel radii
- - Multiprocessing (spawn) with per-worker DEM init
- - coarse->refine ray marching, progress/ETA printed
- - DEM sampling: clamps latitudes to GLD100 supported range (-79..79°) with tiny eps
- - Minor robustness guards in sampling and geometry
+Patched occlusion detection and GLD100-safe DEM sampling.
 
 Requirements:
   pip install spiceypy rasterio numpy pandas
+
+Usage: edit USER CONFIGURATION block and run.
 """
 
 import os
@@ -41,7 +37,7 @@ KERNEL_FILES = [
     "de440.bsp",
 ]
 
-# camera model
+# camera model (for sanity checks)
 sensor_width_mm = 21.44
 sensor_pixels = 4096.0
 mm_per_pixel = sensor_width_mm / sensor_pixels
@@ -50,27 +46,29 @@ f_mm = 35.0
 # limb sampling
 n_angles = 2048
 
-# ray marching
-ray_step_km = 0.2
-coarse_factor = 8
+# ray marching (tweak these for resolution / correctness)
+ray_step_km = 0.2           # fine step (km)
+coarse_factor = 6           # coarse step = ray_step_km * coarse_factor
 extra_clearance_km = 5.0
+EPS_KM = 1e-3               # 1 meter tolerance
+MAX_RADIUS_PX = 1e6
 
+# multiprocessing
 use_multiprocessing = True
-# pick workers: leave one core free
 num_workers = max(1, min(mp.cpu_count() - 1, 11))
 
-# clamps & eps
-EPS_KM = 0.001  # 1 m tolerance
-MAX_RADIUS_PX = 1e6  # clamp insane pixel radii
-
-# --- GLD100-specific geospatial limits (from USGS GLD100 metadata) ---
-# GLD100 covers latitudes from -79 to +79 degrees (planetocentric), longitudes -180..180
+# GLD100-specific geospatial limits (from USGS GLD100 metadata)
 DEM_MIN_LAT = -79.0
 DEM_MAX_LAT = 79.0
 DEM_MIN_LON = -180.0
 DEM_MAX_LON = 180.0
-DEM_LAT_EPS = 1e-8  # small epsilon to avoid exact-edge numerical issues
-# ------------------------------------------------------
+DEM_LAT_EPS = 1e-8
+
+# debugging
+DEBUG_OCCLUSION = False     # set True to print occasional per-angle occlusion debug
+
+
+# ----------------- End user configuration -----------------
 
 def find_ephemeris_bsp(kernel_dir):
     for fn in os.listdir(kernel_dir):
@@ -115,23 +113,18 @@ def dem_sample_point_ds(ds, lon_deg, lat_deg):
     Bilinear sample DEM (handles wrap-around lon candidates).
     Returns elevation in meters or nan.
 
-    Important: GLD100 only covers latitudes in [-79, 79] (planetocentric).
-    We'll clamp latitude to that range with a tiny epsilon to avoid
-    attempting reads outside the raster vertical coverage.
+    GLD100 covers latitudes [-79, 79] (planetocentric). We clamp latitudes here.
     """
-    # clamp lat to GLD100 supported range to avoid sampling outside DEM extents
     lat_deg = float(lat_deg)
     lon_deg = float(lon_deg)
     lat_deg = max(DEM_MIN_LAT + DEM_LAT_EPS, min(DEM_MAX_LAT - DEM_LAT_EPS, lat_deg))
 
-    nodata = None
     try:
         nodata = ds.nodatavals[0]
     except Exception:
         nodata = None
 
     ds_crs = ds.crs
-    # try candidate longitudes in case ds uses a different domain/wrap
     lon_candidates = [lon_deg, lon_deg + 360.0, lon_deg - 360.0]
     for lon_try in lon_candidates:
         try:
@@ -152,7 +145,6 @@ def dem_sample_point_ds(ds, lon_deg, lat_deg):
             except Exception:
                 continue
 
-        # if requested point is way outside raster, skip
         if colf < -1 or colf > ds.width or rowf < -1 or rowf > ds.height:
             continue
 
@@ -236,7 +228,7 @@ def _worker_init(dem_path):
 def find_intersection_for_psi(args):
     """
     Worker: compute limb sample for a single psi angle.
-    args is a tuple of many precomputed constants (kept picklable). Returns (idx, row_dict).
+    Returns (idx, row_dict).
     """
     (idx, psi, moon_pos_wrt_earth, sun_pos_wrt_earth, obs_j2000,
      J2M, M2J, u_vec, moon_mean_radius_km, f_mm, mm_per_pixel,
@@ -246,7 +238,6 @@ def find_intersection_for_psi(args):
     if ds is None:
         raise RuntimeError("DEM not initialized in worker")
 
-    # convert lists back to numpy arrays
     moon_pos = np.array(moon_pos_wrt_earth, dtype=float)
     sun_pos = np.array(sun_pos_wrt_earth, dtype=float)
     obs_pos = np.array(obs_j2000, dtype=float)
@@ -269,7 +260,7 @@ def find_intersection_for_psi(args):
 
     dir_j2000 = math.cos(psi) * e1 + math.sin(psi) * e2
 
-    # direction in moon-fixed frame
+    # direction in moon-fixed frame -> get surface lat/lon from this direction
     dir_mf = J2M.dot(dir_j2000)
     x, y, z = float(dir_mf[0]), float(dir_mf[1]), float(dir_mf[2])
     r = math.sqrt(x * x + y * y + z * z)
@@ -284,9 +275,7 @@ def find_intersection_for_psi(args):
             lon_deg -= 360.0
 
     # Clamp lat/lon to GLD100 extents before sampling elevation
-    # dem_sample_point_ds also clamps, but we do a proactive clamp here for clarity
     lat_deg = max(DEM_MIN_LAT + DEM_LAT_EPS, min(DEM_MAX_LAT - DEM_LAT_EPS, lat_deg))
-    # wrap longitude into -180..180
     if lon_deg > 180.0:
         lon_deg -= 360.0
     if lon_deg < -180.0:
@@ -294,7 +283,6 @@ def find_intersection_for_psi(args):
 
     elev_m = dem_sample_point_ds(ds, lon_deg, lat_deg)
     if math.isnan(elev_m):
-        # fallback to zero if no DEM data (should be rare after clamp)
         elev_m = 0.0
 
     eff_r_km = float(moon_mean_radius_km + elev_m / 1000.0)
@@ -310,7 +298,7 @@ def find_intersection_for_psi(args):
     surf_j2000 = M2J.dot(surf_mf_pos)
     surface_abs_j2000 = moon_pos + surf_j2000
 
-    # --- Correct angular offset: angle between vectors from OBSERVER to surface and observer to moon center
+    # angle between observer->surface and observer->moon center (for image radius)
     v_surf = surface_abs_j2000 - obs_pos
     v_center = moon_pos - obs_pos
     norm_vs = np.linalg.norm(v_surf)
@@ -322,11 +310,11 @@ def find_intersection_for_psi(args):
         dotv = max(-1.0, min(1.0, dotv))
         ang_rad = math.acos(dotv)
 
-    # compute radius in image mm->px (guard against extremely large values)
+    # project to px (thin-lens / small-angle approx)
     try:
         radius_mm = f_mm * math.tan(ang_rad)
     except Exception:
-        radius_mm = f_mm * ang_rad  # fallback
+        radius_mm = f_mm * ang_rad
     radius_px = radius_mm / mm_per_pixel
     if not np.isfinite(radius_px) or radius_px < 0:
         radius_px = 0.0
@@ -334,93 +322,113 @@ def find_intersection_for_psi(args):
     x_px = radius_px * math.cos(psi)
     y_px = radius_px * math.sin(psi)
 
-    # --- Occlusion test: coarse->refine ray-marching from surface toward Sun ---
+    # --- Occlusion test: cast ray from surface towards Sun and look for intersection with lunar surface ---
     vec_sun = sun_pos - surface_abs_j2000
     dist_to_sun_km = np.linalg.norm(vec_sun)
     sun_visible = True
+
     if dist_to_sun_km <= 0:
         sun_visible = False
     else:
         sun_dir = vec_sun / dist_to_sun_km
+
+        # safe sampling ranges
+        s_start = max(ray_step_km * 0.05, 1e-6)   # start very close to surface
+        max_s = min(dist_to_sun_km, stop_radius_km * 2.5)
+
         coarse_step = ray_step_km * coarse_factor
-        s = coarse_step
+        if coarse_step < ray_step_km:
+            coarse_step = ray_step_km
+
         hit_coarse = False
-        while True:
+        last_safe_s = 0.0
+        s = s_start
+        # Coarse scanning (but starting very near surface)
+        while s <= max_s:
             sample_pos = surface_abs_j2000 + s * sun_dir
             vec_from_moon_center = sample_pos - moon_pos
             r_km = np.linalg.norm(vec_from_moon_center)
-            if r_km > stop_radius_km:
+            # If we're already far outside the moon, no occlusion further
+            if r_km > (stop_radius_km + extra_clearance_km):
                 break
+
+            # convert to moon-fixed to sample DEM
             sample_mf = J2M.dot(vec_from_moon_center)
             sx, sy, sz = float(sample_mf[0]), float(sample_mf[1]), float(sample_mf[2])
-            rr = math.sqrt(sx*sx + sy*sy + sz*sz)
+            rr = math.sqrt(sx * sx + sy * sy + sz * sz)
             if rr <= 0:
+                last_safe_s = s
                 s += coarse_step
-                if s > stop_radius_km * 2.0:
-                    break
                 continue
-            sample_lat_rad = math.asin(sz / rr)
+
+            sample_lat_rad = math.asin(max(-1.0, min(1.0, sz / rr)))
             sample_lon_rad = math.atan2(sy, sx)
             sample_lat_deg = math.degrees(sample_lat_rad)
             sample_lon_deg = math.degrees(sample_lon_rad)
             if sample_lon_deg > 180.0:
                 sample_lon_deg -= 360.0
 
-            # clamp sample_lat_deg to GLD100 extent before DEM access
+            # clamp sample latitude before DEM access
             sample_lat_deg = max(DEM_MIN_LAT + DEM_LAT_EPS, min(DEM_MAX_LAT - DEM_LAT_EPS, sample_lat_deg))
 
             sample_elev_m = dem_sample_point_ds(ds, sample_lon_deg, sample_lat_deg)
             if math.isnan(sample_elev_m):
+                last_safe_s = s
                 s += coarse_step
                 continue
+
             sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
+
+            # If the sample point is inside the local surface radius -> there is an occluding terrain
             if rr < (sample_local_radius_km - EPS_KM):
                 hit_coarse = True
+                hit_s = s
                 break
+
+            last_safe_s = s
             s += coarse_step
-            if s > stop_radius_km * 2.0:
-                break
 
         if not hit_coarse:
             sun_visible = True
         else:
-            s_ref = max(ray_step_km, s - coarse_step)
-            sun_visible = True
-            while True:
+            # refine using smaller steps between last_safe_s and hit_s
+            refine_start = max(ray_step_km * 0.01, last_safe_s)
+            refine_end = max(hit_s, refine_start + ray_step_km)
+            refine_step = max(ray_step_km * 0.125, 0.01)
+            s_ref = refine_start
+            occluded = False
+            while s_ref <= refine_end:
                 sample_pos = surface_abs_j2000 + s_ref * sun_dir
                 vec_from_moon_center = sample_pos - moon_pos
                 r_km = np.linalg.norm(vec_from_moon_center)
-                if r_km > stop_radius_km:
+                if r_km > (stop_radius_km + extra_clearance_km):
                     break
                 sample_mf = J2M.dot(vec_from_moon_center)
                 sx, sy, sz = float(sample_mf[0]), float(sample_mf[1]), float(sample_mf[2])
-                rr = math.sqrt(sx*sx + sy*sy + sz*sz)
+                rr = math.sqrt(sx * sx + sy * sy + sz * sz)
                 if rr <= 0:
-                    s_ref += ray_step_km
-                    if s_ref > stop_radius_km * 2.0:
-                        break
+                    s_ref += refine_step
                     continue
-                sample_lat_rad = math.asin(sz / rr)
+                sample_lat_rad = math.asin(max(-1.0, min(1.0, sz / rr)))
                 sample_lon_rad = math.atan2(sy, sx)
                 sample_lat_deg = math.degrees(sample_lat_rad)
                 sample_lon_deg = math.degrees(sample_lon_rad)
                 if sample_lon_deg > 180.0:
                     sample_lon_deg -= 360.0
-
-                # clamp sample_lat_deg again
                 sample_lat_deg = max(DEM_MIN_LAT + DEM_LAT_EPS, min(DEM_MAX_LAT - DEM_LAT_EPS, sample_lat_deg))
 
                 sample_elev_m = dem_sample_point_ds(ds, sample_lon_deg, sample_lat_deg)
                 if math.isnan(sample_elev_m):
-                    s_ref += ray_step_km
+                    s_ref += refine_step
                     continue
                 sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
+
                 if rr < (sample_local_radius_km - EPS_KM):
-                    sun_visible = False
+                    occluded = True
                     break
-                s_ref += ray_step_km
-                if s_ref > stop_radius_km * 2.0:
-                    break
+                s_ref += refine_step
+
+            sun_visible = not occluded
 
     # build output row
     row = {
@@ -435,11 +443,15 @@ def find_intersection_for_psi(args):
         "y_px": float(y_px),
         "sun_visible": bool(sun_visible),
     }
+
+    if DEBUG_OCCLUSION and (idx % max(1, int(len(np.linspace(0, 2.0 * math.pi, 36))))) == 0:
+        print(f"[DBG] psi_idx={idx} psi_deg={row['psi_deg']:.3f} lat={lat_deg:.3f} lon={lon_deg:.3f} elev_m={elev_m:.2f} sun_visible={sun_visible}")
+
     return (idx, row)
 
 
 def main():
-    print("=== generate_moon_limb_profile_with_occlusion.py (patched) ===")
+    print("=== generate_moon_limb_profile_with_occlusion.py (patched occlusion) ===")
     print("KERNEL_DIR:", KERNEL_DIR)
     print("DEM_PATH:", DEM_PATH)
     print("Time (UTC):", t_utc_iso)
@@ -540,6 +552,8 @@ def main():
     results = [None] * n_angles
     start_time = time.time()
 
+    occluded_count = 0
+
     if use_multiprocessing and num_workers > 1:
         ctx = get_context("spawn")
         print("\nUsing multiprocessing: True num_workers:", num_workers)
@@ -552,6 +566,8 @@ def main():
             for res in it:
                 idx, row = res
                 results[idx] = row
+                if not row["sun_visible"]:
+                    occluded_count += 1
                 processed += 1
                 if processed % max(1, n_angles // 100) == 0 or (time.time() - last_print) > 1.0:
                     elapsed = time.time() - start_time
@@ -570,6 +586,8 @@ def main():
         for args in worker_args:
             idx, row = find_intersection_for_psi(args)
             results[idx] = row
+            if not row["sun_visible"]:
+                occluded_count += 1
             processed += 1
             if processed % max(1, n_angles // 100) == 0 or (time.time() - last_print) > 1.0:
                 elapsed = time.time() - start_time
@@ -580,6 +598,7 @@ def main():
 
     elapsed = time.time() - start_time
     print(f"\nProcessed {n_angles} angles in {elapsed:.1f}s ({elapsed/n_angles:.4f} s per angle)")
+    print("Detected occluded (sun not visible) limb samples:", occluded_count, " / ", n_angles)
 
     rows_ordered = [results[i] for i in range(n_angles)]
     df = pd.DataFrame(rows_ordered)
