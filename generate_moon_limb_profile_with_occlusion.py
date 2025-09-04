@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 generate_moon_limb_profile_with_occlusion_patched_final.py
-
 Fixed:
  - correct angular-offset computation (observer -> surface vs observer -> moon center)
  - avoids infinite/tiny numerical issues and clamps insane pixel radii
@@ -11,7 +10,6 @@ Fixed:
 Requirements:
   pip install spiceypy rasterio numpy pandas
 """
-
 import os
 import math
 import time
@@ -19,7 +17,6 @@ import multiprocessing as mp
 from multiprocessing import get_context
 import numpy as np
 import pandas as pd
-
 import spiceypy as sp
 import rasterio
 from rasterio.warp import transform as rio_transform
@@ -27,7 +24,7 @@ import rasterio.windows
 
 # ----------------- USER CONFIGURATION -----------------
 KERNEL_DIR = r"C:\Users\SoR\Desktop\jpl_sun_eclipse_project\spice_kernels"
-DEM_PATH   = r"C:\Users\SoR\Desktop\jpl_sun_eclipse_project\moon_dem\GLD100.tif"
+DEM_PATH = r"C:\Users\SoR\Desktop\jpl_sun_eclipse_project\moon_dem\GLD100.tif"
 
 t_utc_iso = "2006-03-29 10:53:22.600"
 observer_lat_deg = 36.14265853184001
@@ -55,7 +52,6 @@ n_angles = 2048
 ray_step_km = 0.2
 coarse_factor = 8
 extra_clearance_km = 5.0
-
 use_multiprocessing = True
 # pick workers: leave one core free
 num_workers = max(1, min(mp.cpu_count() - 1, 11))
@@ -63,7 +59,6 @@ num_workers = max(1, min(mp.cpu_count() - 1, 11))
 # clamps & eps
 EPS_KM = 0.001  # 1 m tolerance
 MAX_RADIUS_PX = 1e6  # clamp insane pixel radii
-
 # ------------------------------------------------------
 
 def find_ephemeris_bsp(kernel_dir):
@@ -104,6 +99,7 @@ def load_spice_kernels(kernel_dir, extras=None):
 def dem_sample_point_ds(ds, lon_deg, lat_deg):
     """
     Bilinear sample DEM (handles wrap-around lon candidates).
+
     Returns elevation in meters or nan.
     """
     nodata = None
@@ -111,6 +107,7 @@ def dem_sample_point_ds(ds, lon_deg, lat_deg):
         nodata = ds.nodatavals[0]
     except Exception:
         nodata = None
+
     ds_crs = ds.crs
     lon_candidates = [lon_deg, lon_deg + 360.0, lon_deg - 360.0]
     for lon_try in lon_candidates:
@@ -186,7 +183,6 @@ def dem_sample_point_ds(ds, lon_deg, lat_deg):
 # per-worker DEM init
 _GLOBAL_DEM_PATH = None
 _GLOBAL_DEM_DS = None
-
 def _worker_init(dem_path):
     global _GLOBAL_DEM_PATH, _GLOBAL_DEM_DS
     _GLOBAL_DEM_PATH = dem_path
@@ -197,18 +193,10 @@ def _worker_init(dem_path):
         raise RuntimeError("Worker failed to open DEM at {}: {}".format(dem_path, e))
 
 def find_intersection_for_psi(args):
+    """ Worker: compute limb sample for a single psi angle.
+    args is a tuple of many precomputed constants (kept picklable). Returns (idx, row_dict).
     """
-    Worker: compute limb sample for a single psi angle.
-    args is a tuple of many precomputed constants (kept picklable).
-    Returns (idx, row_dict).
-    """
-    (idx, psi,
-     moon_pos_wrt_earth, sun_pos_wrt_earth, obs_j2000,
-     J2M, M2J, u_vec,
-     moon_mean_radius_km,
-     f_mm, mm_per_pixel,
-     ray_step_km, coarse_factor, stop_radius_km,
-     extra_clearance_km) = args
+    (idx, psi, moon_pos_wrt_earth, sun_pos_wrt_earth, obs_j2000, J2M, M2J, u_vec, moon_mean_radius_km, f_mm, mm_per_pixel, ray_step_km, coarse_factor, stop_radius_km, extra_clearance_km) = args
 
     ds = _GLOBAL_DEM_DS
     if ds is None:
@@ -248,8 +236,8 @@ def find_intersection_for_psi(args):
         lon_rad = math.atan2(y, x)
         lat_deg = math.degrees(lat_rad)
         lon_deg = math.degrees(lon_rad)
-        if lon_deg > 180.0:
-            lon_deg -= 360.0
+    if lon_deg > 180.0:
+        lon_deg -= 360.0
 
     elev_m = dem_sample_point_ds(ds, lon_deg, lat_deg)
     if math.isnan(elev_m):
@@ -276,7 +264,6 @@ def find_intersection_for_psi(args):
     if norm_vs <= 0 or norm_vc <= 0:
         ang_rad = 0.0
     else:
-        # clamp dot to [-1,1]
         dotv = float(np.dot(v_surf, v_center) / (norm_vs * norm_vc))
         dotv = max(-1.0, min(1.0, dotv))
         ang_rad = math.acos(dotv)
@@ -289,9 +276,7 @@ def find_intersection_for_psi(args):
     radius_px = radius_mm / mm_per_pixel
     if not np.isfinite(radius_px) or radius_px < 0:
         radius_px = 0.0
-    # clamp
     radius_px = min(radius_px, MAX_RADIUS_PX)
-
     x_px = radius_px * math.cos(psi)
     y_px = radius_px * math.sin(psi)
 
@@ -317,13 +302,15 @@ def find_intersection_for_psi(args):
             rr = math.sqrt(sx*sx + sy*sy + sz*sz)
             if rr <= 0:
                 s += coarse_step
-                if s > stop_radius_km * 2.0: break
+                if s > stop_radius_km * 2.0:
+                    break
                 continue
             sample_lat_rad = math.asin(sz / rr)
             sample_lon_rad = math.atan2(sy, sx)
             sample_lat_deg = math.degrees(sample_lat_rad)
             sample_lon_deg = math.degrees(sample_lon_rad)
-            if sample_lon_deg > 180.0: sample_lon_deg -= 360.0
+            if sample_lon_deg > 180.0:
+                sample_lon_deg -= 360.0
             sample_elev_m = dem_sample_point_ds(ds, sample_lon_deg, sample_lat_deg)
             if math.isnan(sample_elev_m):
                 s += coarse_step
@@ -335,6 +322,7 @@ def find_intersection_for_psi(args):
             s += coarse_step
             if s > stop_radius_km * 2.0:
                 break
+
         if not hit_coarse:
             sun_visible = True
         else:
@@ -358,7 +346,8 @@ def find_intersection_for_psi(args):
                 sample_lon_rad = math.atan2(sy, sx)
                 sample_lat_deg = math.degrees(sample_lat_rad)
                 sample_lon_deg = math.degrees(sample_lon_rad)
-                if sample_lon_deg > 180.0: sample_lon_deg -= 360.0
+                if sample_lon_deg > 180.0:
+                    sample_lon_deg -= 360.0
                 sample_elev_m = dem_sample_point_ds(ds, sample_lon_deg, sample_lat_deg)
                 if math.isnan(sample_elev_m):
                     s_ref += ray_step_km
@@ -392,11 +381,13 @@ def main():
     print("DEM_PATH:", DEM_PATH)
     print("Time (UTC):", t_utc_iso)
     print("Observer lat,lon,alt:", observer_lat_deg, observer_lon_deg, observer_alt_m)
+
     if not os.path.isdir(KERNEL_DIR):
         raise RuntimeError("KERNEL_DIR not found: " + KERNEL_DIR)
     loaded = load_spice_kernels(KERNEL_DIR)
     print("\nSPICE kernels loaded ({}):".format(len(loaded)))
-    for p in loaded: print("   ", p)
+    for p in loaded:
+        print(" ", p)
     bsp_used = None
     for p in loaded:
         fn = os.path.basename(p).lower()
@@ -468,21 +459,18 @@ def main():
     stop_radius_km = moon_mean_radius_km + max_elev_km + extra_clearance_km
 
     print("\nSampling limb with n_angles =", n_angles)
-    print("Ray-marching params: ray_step_km =", ray_step_km, "coarse_factor =", coarse_factor,
-          "stop_radius_km =", stop_radius_km)
+    print("Ray-marching params: ray_step_km =", ray_step_km, "coarse_factor =", coarse_factor, "stop_radius_km =", stop_radius_km)
+
     psis = np.linspace(0.0, 2.0 * math.pi, n_angles, endpoint=False)
 
     # prepare worker args
     worker_args = []
     for idx, psi in enumerate(psis):
         worker_args.append((
-            idx, psi,
-            moon_pos_wrt_earth.tolist(), sun_pos_wrt_earth.tolist(), obs_j2000.tolist(),
-            J2M.tolist(), M2J.tolist(), u_moon_to_obs.tolist(),
-            moon_mean_radius_km,
-            f_mm, mm_per_pixel,
-            ray_step_km, coarse_factor, stop_radius_km,
-            extra_clearance_km
+            idx, psi, moon_pos_wrt_earth.tolist(), sun_pos_wrt_earth.tolist(),
+            obs_j2000.tolist(), J2M.tolist(), M2J.tolist(), u_moon_to_obs.tolist(),
+            moon_mean_radius_km, f_mm, mm_per_pixel, ray_step_km, coarse_factor,
+            stop_radius_km, extra_clearance_km
         ))
 
     results = [None] * n_angles
@@ -490,7 +478,7 @@ def main():
 
     if use_multiprocessing and num_workers > 1:
         ctx = get_context("spawn")
-        print("\nUsing multiprocessing: True  num_workers:", num_workers)
+        print("\nUsing multiprocessing: True num_workers:", num_workers)
         print("Starting Pool with {} workers...".format(num_workers))
         pool = ctx.Pool(processes=num_workers, initializer=_worker_init, initargs=(DEM_PATH,))
         try:
@@ -505,7 +493,7 @@ def main():
                     elapsed = time.time() - start_time
                     rate = processed / elapsed if elapsed > 0 else 0.0
                     eta = (n_angles - processed) / rate if rate > 0 else float('inf')
-                    print(f"Processed {processed}/{n_angles} angles...  rate={rate:.2f}/s  ETA={eta:.1f}s")
+                    print(f"Processed {processed}/{n_angles} angles... rate={rate:.2f}/s ETA={eta:.1f}s")
                     last_print = time.time()
         finally:
             pool.close()
@@ -523,12 +511,11 @@ def main():
                 elapsed = time.time() - start_time
                 rate = processed / elapsed if elapsed > 0 else 0.0
                 eta = (n_angles - processed) / rate if rate > 0 else float('inf')
-                print(f"Processed {processed}/{n_angles} angles...  rate={rate:.2f}/s  ETA={eta:.1f}s")
+                print(f"Processed {processed}/{n_angles} angles... rate={rate:.2f}/s ETA={eta:.1f}s")
                 last_print = time.time()
 
     elapsed = time.time() - start_time
     print(f"\nProcessed {n_angles} angles in {elapsed:.1f}s ({elapsed/n_angles:.4f} s per angle)")
-
     rows_ordered = [results[i] for i in range(n_angles)]
     df = pd.DataFrame(rows_ordered)
     df.to_csv(OUT_CSV, index=False)
