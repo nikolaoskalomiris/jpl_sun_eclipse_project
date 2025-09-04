@@ -1,0 +1,65 @@
+{
+  "project": "jpl_sun_eclipse_project",
+  "purpose": "Astronomically accurate total solar eclipse VFX simulation (Kastelorizo, GR)",
+  "observer": {
+    "lat_deg": 36.14265853184001,
+    "lon_deg": 29.576375086997015,
+    "alt_m": 2.0
+  },
+  "center_time_utc": "2006-03-29 10:53:22.600",
+  "ephemeris": {
+    "preferred": "de440",
+    "alternates": ["de432s","de440s","de442","de442s"],
+    "kernel_dir": "C:\\Users\\SoR\\Desktop\\jpl_sun_eclipse_project\\spice_kernels"
+  },
+  "camera": {
+    "f_mm": 35.0,
+    "sensor_width_mm": 21.44,
+    "sensor_pixels": 4096.0,
+    "mm_per_pixel": 0.005234375
+  },
+  "ae_importer": {
+    "jsx": "import_eclipse_3d_from_csv_timecompress_centered_fixed_parentscale_patch.jsx",
+    "moon_texture_px": 500,
+    "sun_texture_px": 500,
+    "posMultiplier": 16.488758,
+    "bakeCameraMode": "off"
+  },
+  "csv_generator": {
+    "script": "generate_eclipse_csv_astropy_centered_expand_with_recommend_updated.py",
+    "out_csv": "eclipse_keyframes_full.csv",
+    "frames": 2000,
+    "initial_total_duration_seconds": 10800,
+    "edge_clearance_factor": 0.9
+  },
+  "limb_generator": {
+    "script": "generate_moon_limb_profile_with_intensity.py",
+    "dem_path": "C:\\Users\\SoR\\Desktop\\jpl_sun_eclipse_project\\moon_dem\\GLD100.tif",
+    "n_angles": 2048,
+    "ray_step_km": 0.2,
+    "coarse_factor": 8,
+    "sun_samples": 16,
+    "out_csv": "moon_limb_profile_with_intensity.csv",
+    "approx_dem_resolution_m": 118.45
+  },
+  "issues_and_notes": [
+    "RG Geo parent-scale forces using moon_texture_px = 500 in AE; importer patched to compute parent-scale-aware percent scales.",
+    "Multiprocessing originally duplicated DEM across workers and exhausted RAM; mitigations: crop DEM & use shared memory or Numba-parallel approach. RAM is not utilized in the script after that.",
+    "CUDA/numba GPU experiments hit compatibility issues with Python 3.13 and numba/cuda on RTX 4060; currently CPU-only Numba or multiprocessing recommended.",
+    "Some early runs produced NaNs / extreme huge 'radius_px' values due to sampling at exactly 90-deg (It is not handled yet. Clamping required)."
+  ],
+  "next_steps_recommended": [
+    "Verify 2D projected Moon path against independent ephemeris/visualization (e.g., JPL Horizons, Stellarium) and confirm the 'L' shape is correct for the observer location.",
+    "Finalize limb intensity pipeline: deterministic sampling, clamp DEM coordinate transforms, produce per-frame alpha maps or animated OBJ.",
+    "Decide on final ephemeris (de440 recommended), store BSPs in KERNEL_DIR (or Windows NAIF location) and record filenames.",
+    "Convert JSON snapshot above into repo file `project_context.json` to preserve context across sessions."
+  ],
+  "advanced_directive": {
+    "keep_moon_texture_px": 500,
+    "keep_sun_texture_px": 500,
+    "posMultiplier_locked": 16.488758,
+    "center_time_locked": "2006-03-29 10:53:22.600",
+    "bakeCameraMode": "off"
+  },
+  "repo_url": "https://github.com/nikolaoskalomiris/jpl_sun_eclipse_project"
+}
