@@ -1,0 +1,35 @@
+Using JPL ephemeris: de440
+Ephemeris used for this run: de440
+Found coarse minimum separation at: 2006-03-29 10:53:22.600 UTC
+Coarse minimum angular separation (deg): 0.008307383347095056
+Testing half-window = 1.500 h -> edge seps (deg): before=0.626839, after=0.638550; threshold=0.492414
+Using total_duration_seconds = 3.000000 hours (half = 1.500000 h)
+Edge separations (deg): before= 0.6268386742778065  after= 0.6385496952409421  (min_edge_sep= 0.6268386742778065 )
+Wrote eclipse_keyframes_full.csv (frames=2000, total_duration_seconds=10800.0s)
+Center time (UTC): 2006-03-29 10:53:22.600
+Minimum angular separation (deg): 0.008307383347095056
+Max radial offset (sensor px) across window: 74.524 px
+Max abs X offset (sensor px): 64.281 px, Max abs Y offset (sensor px): 73.423 px
+
+=== Recommendation for CSV->AE mapping ===
+Composition width used for recommendation: 4096.0 px
+baseline_sensorToComp (comp_px per sensor_px) = comp_width / sensor_pixels = 1.000000
+Desired screen coverage fraction = 0.600 (0..1)
+Allowed half-comp px = 1228.800 px
+Computed recommended posMultiplier (unclamped) = 16.488758
+Recommended posMultiplier (clamped to [0.050000, 10.000000]) = 10.000000
+→ Use this value for `posMultiplier` in your JSX (or set posMultiplier = 0 in JSX and let it auto-calc from sensor_pixels and comp width).
+
+=== Scientific / modelling notes ===
+- Using topocentric AltAz from Astropy: parallax and correct observer geometry included.
+- Distances taken from astropy cartesian vectors; angular sizes derived via simple geometry (diameter/distance).
+- Ephemeris: de440 used for planetary positions.
+- Limitations: no atmospheric refraction correction applied; limb darkening and eclipse penumbra/umbra ground-track are NOT modelled here.
+- For VFX this approach is usually sufficient: it matches apparent positions and apparent angular sizes within arc-second-level ephemeris accuracy.
+- If you need sub-arcsecond or ground-track accuracy, you should use full NAIF/SPICE tools and site-specific corrections.
+
+=== How to use ===
+1) Put the generated CSV into the JSX importer you use.
+2) In the JSX, either keep posMultiplier=0 (auto) or set posMultiplier to the recommended value above.
+3) If Moon/Sun still look out of range, increase comp_width_pixels in this script to match your AE comp width and re-run to get a new recommendation.
+4) If you want a world-scale mapping (1 AE px = 1 km), you can also set posMultiplier manually such that 1 AE px corresponds to the chosen km-per-px mapping (but this often produces very large numeric Z/POI values in AE).

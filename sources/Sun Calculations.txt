@@ -1,0 +1,152 @@
+Calculations were done with a 2000 px wide Sun in mind.
+If the Sun is not 2000 px multiply the parameters by:
+
+ ----------------------------
+|S = (sun_diameter_px / 2000)|
+ ----------------------------
+
+Our Sun measured diameter is = 960 px
+
+So:
+---
+S = 960 px / 2000 = x0.48 (factor)
+
+
+ ------------
+|CALCULATIONS|
+ ------------
+
+
+Physics Model
+--------------
+Physics Model: Fluid
+Air Resistance: 0.02 (molecular viscosity proxy: tiny)
+
+
+
+Fluid Dynamics (our “viscosity” & eddies)
+-----------------------------------------
+Viscosity: animate (keyframes below)
+Density: 100
+Pressure: 7
+Buoyancy: 0.2
+Temperature Diffusion: 0.15
+
+
+
+Turbulence Field (eddy viscosity / cascade)
+-------------------------------------------
+Affect Position: 55
+Affect Size: 12
+Scale: 30 (scaled with sun_diam_px / 2000 = 14.4)
+Flow: 0.3
+Octaves: 3–4
+Complexity: 6
+Evolution Speed: 0.1–0.2
+
+
+
+Emitter (active-region sized)
+-----------------------------
+Emitter Type: Sphere
+Emitter Radius: 40 px (~ active region footprint; scale to taste)
+Direction: Directional
+Velocity: 520 (scaled with sun_diam_px / 2000 = 249.6)
+Velocity Random: 30%
+Velocity from Motion: 0
+Particles/sec (Birth Rate): 800–1200 during burst (keyframed)
+
+
+
+Particles
+----------
+Life: 1.6 s (core)
+Life Random: 25%
+Size: 4.0 px (core filaments)
+Size Random: 35%
+Size over Life: fast rise → gentle fall (∩ curve)
+Opacity over Life: 0 → 60% at 10% life → slow fade
+Color: near-white with warm tint (let glow do the color)
+Blend Mode: Add (comp in 32-bit linear)
+
+
+
+Aux System (fine plasma mist)
+-----------------------------
+Emit: Continuous
+Transfer Mode: Add
+Emit Probability: 35%
+Particles/sec: 60
+Velocity: 40
+Life: 0.9 s
+Size: 1.5 px
+Opacity: 35%
+
+
+
+Glow (so it’s bright without mud)
+------------------------------
+Work in 32-bit linear.
+Red Giant VFX Optical Glow on the Particular precomp:
+Threshold: 0.65
+Radius: 150 (scaled with sun_diam_px / 2000 = 72)
+Falloff: 0.85
+Blend: Add, Clamp off
+Luma matte gate using the moon matte so the glow doesn’t bleed “through” the lunar disk during contacts.
+
+
+ -------------------------------------
+|“Viscosity” & eruption keyframe timing|
+ ------------------------------------
+
+Block A — Quiet build (Frames 0–200)
+--------------------------------
+Birth Rate: 80 → 150 (ease in)
+Fluid Viscosity: 45% (stable, sticky)
+Emitter Velocity: 120
+
+
+
+Block B — Trigger (Frames 200–260, i.e., 2.4 s)
+----------------------------------------
+Birth Rate: 150 → 1000 (sharp ease)
+Emitter Velocity: 120 → 520
+Fluid Viscosity: 45% → 18% (drop = plasma “breaks loose”)
+Turbulence Field → Affect Position: 55 → 65 (adds tearing)
+
+
+
+Block C — Peak ejection (Frames 260–500)
+-------------------------------------
+Birth Rate: 1000 → 1200 (short plateau 260–340, then taper)
+Emitter Velocity: 520 (hold)
+Fluid Viscosity: 18% → 28% (slow rise)
+Aux Emit Probability: 35% → 50% (more fine spray)
+
+
+
+Block D — Magnetic re-closure / loop fallback (Frames 500–1100)
+---------------------------------------------------------
+Birth Rate: 1200 → 300
+Emitter Velocity: 520 → 220
+Fluid Viscosity: 28% → 52% (eddy damping now dominates)
+Turbulence Field → Flow: 0.3 → 0.15 (eddies calm; strands settle)
+
+
+
+Block E — Decay (Frames 1100–2000)
+-------------------------------
+Birth Rate: 300 → 60
+Emitter Velocity: 220 → 80
+Fluid Viscosity: 52% → 60%
+Aux Emit Probability: 50% → 15%
+
+
+
+Low viscosity during the impulsive phase (high Re → long coherent filaments), then rising viscosity & reduced turbulence to damp structures as they settle into loop-like arches—consistent with turbulent/eddy dissipation dominating over molecular viscosity.
+
+
+
+TIME HANDLE
+-----------
+If we want slower motion (say ×60 instead of ×120), we chave to reduce Emitter Velocity by 0.5× and Fluid Viscosity by ~−5 to −8 pp across the board (keeping the same envelope). This keeps the flow similarly turbulent (qualitatively same Re regime) but plays slower.

@@ -1,0 +1,12 @@
+Use the DEM-generated limb profile to synthesize a mask layer or a particle emitter that turns on where DEM protrudes — that’s the geometric core for Baily’s beads & diamond ring. Trapcode Particular or Optical Glow can be driven with this mask or keyed particles triggered at those coordinates/times.
+
+For Baily’s beads, treat each limb sample point as a small aperture; when the Sun behind it is visible above the local limb elevation, emit a bright particle/flare (or composite a small radial flare sprite). Use the moon_limb_profile.csv values (proj_x, proj_y) keyed over time with the same time remapping you use for the Moon motion in AE.
+
+If you want very accurate bead intensity you’d need Sun limb brightness & limb darkening model and fraction of Sun visible through local valleys; but geometric visibility + a small bloom is usually photorealistic for VFX.
+
+NEXT POSSIBLE CHECKS
+====================
+
+- Verify the CSV vs. authoritative ephemeris plots (2D path plots, alt/az traces).
+- Run consistency checks between the Python output and expected apparent angular diameters / times.
+- Convert that profile into a mask/heightmap usable by Particular / Trapcode / Optical Glow.
