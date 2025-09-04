@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
 generate_moon_limb_profile_with_occlusion.py
-
-Compute a radial lunar limb profile from a DEM using SPICE geometry,
-perform per-sample occlusion testing (casts rays toward Sun), and
-estimate the visible fraction / intensity of the solar disk at each limb sample.
-
-Patch notes:
- - Adds solar-disk sampling occlusion test to compute visible fraction.
- - Applies a simple linear limb-darkening weighting when computing intensity.
- - Uses multiprocessing (spawn) with per-worker DEM init.
- - Coarse->refine ray marching to speed up occlusion tests.
- - Clamps insane pixel radii and protects against degenerate geometry.
+Fixed:
+ - correct angular-offset computation (observer -> surface vs observer -> moon center)
+ - avoids infinite/tiny numerical issues and clamps insane pixel radii
+ - multiprocessing (spawn) with per-worker DEM init
+ - coarse->refine ray marching, progress/ETA printed
 
 Requirements:
   pip install spiceypy rasterio numpy pandas
@@ -37,7 +31,7 @@ observer_lat_deg = 36.14265853184001
 observer_lon_deg = 29.576375086997015
 observer_alt_m = 2.0
 
-OUT_CSV = "moon_limb_profile_with_intensity.csv"
+OUT_CSV = "moon_limb_profile.csv"
 
 KERNEL_FILES = [
     "naif0012.tls",
@@ -55,22 +49,16 @@ f_mm = 35.0
 n_angles = 2048
 
 # ray marching
-ray_step_km = 0.2            # 200 m steps (fine)
-coarse_factor = 8            # coarse step = ray_step_km * coarse_factor
-extra_clearance_km = 5.0     # safe margin beyond max elevation to stop marching
-
-# solar disk sampling (intensity estimate)
-R_sun_km = 696342.0          # solar radius in km
-n_sun_samples = 32           # number of sample rays across solar disk (32 is modest; increase for accuracy)
-sun_limb_darkening_u = 0.6   # linear limb-darkening coefficient (simple model, 0..1)
-
-# multiprocessing
+ray_step_km = 0.2
+coarse_factor = 8
+extra_clearance_km = 5.0
 use_multiprocessing = True
+# pick workers: leave one core free
 num_workers = max(1, min(mp.cpu_count() - 1, 11))
 
 # clamps & eps
-EPS_KM = 0.001               # 1 m tolerance
-MAX_RADIUS_PX = 1e6         # clamp insane pixel radii
+EPS_KM = 0.001  # 1 m tolerance
+MAX_RADIUS_PX = 1e6  # clamp insane pixel radii
 # ------------------------------------------------------
 
 def find_ephemeris_bsp(kernel_dir):
@@ -111,6 +99,7 @@ def load_spice_kernels(kernel_dir, extras=None):
 def dem_sample_point_ds(ds, lon_deg, lat_deg):
     """
     Bilinear sample DEM (handles wrap-around lon candidates).
+
     Returns elevation in meters or nan.
     """
     nodata = None
@@ -203,221 +192,11 @@ def _worker_init(dem_path):
         _GLOBAL_DEM_DS = None
         raise RuntimeError("Worker failed to open DEM at {}: {}".format(dem_path, e))
 
-def _sample_solar_disk_directions(sun_dir, sun_dist_km, R_sun_km, n_samples):
-    """
-    Generate n_samples unit direction vectors sampling the solar disk (uniform area sampling).
-    sun_dir: unit vector pointing to Sun center (3,)
-    returns list of unit vectors (ndarray n x 3) and corresponding disk radial coordinate rho (0..1)
-    """
-    sun_dir = np.array(sun_dir, dtype=float)
-    # build orthonormal basis around sun_dir
-    if abs(sun_dir[2]) < 0.999:
-        ref = np.array([0.0, 0.0, 1.0])
-    else:
-        ref = np.array([0.0, 1.0, 0.0])
-    su = np.cross(ref, sun_dir)
-    su_norm = np.linalg.norm(su)
-    if su_norm < 1e-12:
-        su = np.array([1.0, 0.0, 0.0])
-    else:
-        su = su / su_norm
-    sv = np.cross(sun_dir, su)
-    sv = sv / np.linalg.norm(sv)
-
-    ang_radius = math.asin(min(1.0, R_sun_km / max(1e-12, sun_dist_km)))  # radians
-
-    dirs = []
-    rhos = []
-    # simple deterministic stratified sampling: concentric disk mapping
-    n = n_samples
-    # choose number of rings ~ sqrt(n)
-    rings = int(math.sqrt(n))
-    if rings < 1: rings = 1
-    count = 0
-    for ring in range(rings):
-        # samples on this ring
-        samples_on_ring = int(round(((ring + 1) / rings) * n / 1.5))  # heuristic allocation
-        samples_on_ring = max(1, samples_on_ring)
-        rho = (ring + 0.5) / rings  # normalized radius
-        for s in range(samples_on_ring):
-            phi = 2.0 * math.pi * (s / samples_on_ring + 0.5 / samples_on_ring)
-            alpha = rho * ang_radius
-            # direction
-            dir_vec = math.cos(alpha) * sun_dir + math.sin(alpha) * (math.cos(phi) * su + math.sin(phi) * sv)
-            dir_vec = dir_vec / np.linalg.norm(dir_vec)
-            dirs.append(dir_vec)
-            rhos.append(rho)
-            count += 1
-            if count >= n:
-                break
-        if count >= n:
-            break
-    # if not enough, fill with center samples
-    while len(dirs) < n:
-        dirs.append(sun_dir.copy())
-        rhos.append(0.0)
-    return np.array(dirs), np.array(rhos)
-
-def _occlusion_ray_march(surface_abs_j2000, moon_pos, sun_dir, stop_radius_km, ray_step_km, ds, J2M, moon_mean_radius_km):
-    """
-    March from the surface point slightly outward along sun_dir and check for DEM intersection.
-    Returns True if the ray reaches beyond stop_radius_km without hitting terrain (visible),
-    False if blocked.
-    """
-    # march starting a small step above surface to avoid immediate self-intersection
-    s = ray_step_km
-    while True:
-        sample_pos = surface_abs_j2000 + s * sun_dir
-        vec_from_moon_center = sample_pos - moon_pos
-        r_km = np.linalg.norm(vec_from_moon_center)
-        # if we've moved beyond the potential blocking region, stop and consider visible
-        if r_km > stop_radius_km:
-            return True
-        # convert to moon frame
-        sample_mf = J2M.dot(vec_from_moon_center)
-        sx, sy, sz = float(sample_mf[0]), float(sample_mf[1]), float(sample_mf[2])
-        rr = math.sqrt(sx*sx + sy*sy + sz*sz)
-        if rr <= 0:
-            s += ray_step_km
-            if s > stop_radius_km * 2.0:
-                return True
-            continue
-        sample_lat_rad = math.asin(sz / rr)
-        sample_lon_rad = math.atan2(sy, sx)
-        sample_lat_deg = math.degrees(sample_lat_rad)
-        sample_lon_deg = math.degrees(sample_lon_rad)
-        if sample_lon_deg > 180.0:
-            sample_lon_deg -= 360.0
-        sample_elev_m = dem_sample_point_ds(ds, sample_lon_deg, sample_lat_deg)
-        if math.isnan(sample_elev_m):
-            s += ray_step_km
-            continue
-        sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
-        if rr < (sample_local_radius_km - EPS_KM):
-            return False
-        s += ray_step_km
-        if s > stop_radius_km * 2.0:
-            return True
-
-def _compute_solar_visible_fraction(surface_abs_j2000, sun_pos, moon_pos, J2M, moon_mean_radius_km, ds, ray_step_km, stop_radius_km, n_samples, R_sun_km, limb_dark_u):
-    """
-    Sample solar disk directions from the surface point and compute:
-      - visible_fraction: fraction of sample rays that reach beyond stop_radius_km
-      - intensity: limb-darkening weighted fraction (0..1)
-    """
-    vec_sun = sun_pos - surface_abs_j2000
-    dist_to_sun_km = np.linalg.norm(vec_sun)
-    if dist_to_sun_km <= 0:
-        return 0.0, 0.0
-    sun_dir = vec_sun / dist_to_sun_km
-
-    dirs, rhos = _sample_solar_disk_directions(sun_dir, dist_to_sun_km, R_sun_km, n_samples)
-    ds_local = ds  # worker-global
-    visible_count = 0
-    weights = []
-    visible_weights_sum = 0.0
-    total_weight_sum = 0.0
-
-    # limb-darkening weight per sample: mu = sqrt(1 - rho^2), weight = 1 - u*(1 - mu)
-    for i in range(len(dirs)):
-        rho = rhos[i]
-        mu = math.sqrt(max(0.0, 1.0 - rho * rho))
-        w = 1.0 - limb_dark_u * (1.0 - mu)
-        weights.append(w)
-        total_weight_sum += w
-
-    for i, d in enumerate(dirs):
-        # use coarse->refine for each sample direction: coarse march first
-        # coarse step
-        coarse_step = ray_step_km * coarse_factor
-        s = coarse_step
-        hit_coarse = False
-        while True:
-            sample_pos = surface_abs_j2000 + s * d
-            vec_from_moon_center = sample_pos - moon_pos
-            r_km = np.linalg.norm(vec_from_moon_center)
-            if r_km > stop_radius_km:
-                break
-            sample_mf = J2M.dot(vec_from_moon_center)
-            sx, sy, sz = float(sample_mf[0]), float(sample_mf[1]), float(sample_mf[2])
-            rr = math.sqrt(sx*sx + sy*sy + sz*sz)
-            if rr <= 0:
-                s += coarse_step
-                if s > stop_radius_km * 2.0:
-                    break
-                continue
-            sample_lat_rad = math.asin(sz / rr)
-            sample_lon_rad = math.atan2(sy, sx)
-            sample_lat_deg = math.degrees(sample_lat_rad)
-            sample_lon_deg = math.degrees(sample_lon_rad)
-            if sample_lon_deg > 180.0:
-                sample_lon_deg -= 360.0
-            sample_elev_m = dem_sample_point_ds(ds_local, sample_lon_deg, sample_lat_deg)
-            if math.isnan(sample_elev_m):
-                s += coarse_step
-                continue
-            sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
-            if rr < (sample_local_radius_km - EPS_KM):
-                hit_coarse = True
-                break
-            s += coarse_step
-            if s > stop_radius_km * 2.0:
-                break
-        if not hit_coarse:
-            # visible
-            visible_count += 1
-            visible_weights_sum += weights[i]
-        else:
-            # refine around s-coarse
-            s_ref = max(ray_step_km, s - coarse_step)
-            blocked = False
-            while True:
-                sample_pos = surface_abs_j2000 + s_ref * d
-                vec_from_moon_center = sample_pos - moon_pos
-                r_km = np.linalg.norm(vec_from_moon_center)
-                if r_km > stop_radius_km:
-                    break
-                sample_mf = J2M.dot(vec_from_moon_center)
-                sx, sy, sz = float(sample_mf[0]), float(sample_mf[1]), float(sample_mf[2])
-                rr = math.sqrt(sx*sx + sy*sy + sz*sz)
-                if rr <= 0:
-                    s_ref += ray_step_km
-                    if s_ref > stop_radius_km * 2.0:
-                        break
-                    continue
-                sample_lat_rad = math.asin(sz / rr)
-                sample_lon_rad = math.atan2(sy, sx)
-                sample_lat_deg = math.degrees(sample_lat_rad)
-                sample_lon_deg = math.degrees(sample_lon_rad)
-                if sample_lon_deg > 180.0:
-                    sample_lon_deg -= 360.0
-                sample_elev_m = dem_sample_point_ds(ds_local, sample_lon_deg, sample_lat_deg)
-                if math.isnan(sample_elev_m):
-                    s_ref += ray_step_km
-                    continue
-                sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
-                if rr < (sample_local_radius_km - EPS_KM):
-                    blocked = True
-                    break
-                s_ref += ray_step_km
-                if s_ref > stop_radius_km * 2.0:
-                    break
-            if not blocked:
-                visible_count += 1
-                visible_weights_sum += weights[i]
-
-    visible_frac = float(visible_count) / float(len(dirs)) if len(dirs) > 0 else 0.0
-    intensity = (visible_weights_sum / total_weight_sum) if total_weight_sum > 0 else visible_frac
-    # clamp
-    visible_frac = max(0.0, min(1.0, visible_frac))
-    intensity = max(0.0, min(1.0, intensity))
-    return visible_frac, intensity
-
 def find_intersection_for_psi(args):
     """ Worker: compute limb sample for a single psi angle.
     args is a tuple of many precomputed constants (kept picklable). Returns (idx, row_dict).
     """
-    (idx, psi, moon_pos_wrt_earth, sun_pos_wrt_earth, obs_j2000, J2M, M2J, u_vec, moon_mean_radius_km, f_mm, mm_per_pixel, ray_step_km, coarse_factor, stop_radius_km, extra_clearance_km, n_sun_samples, R_sun_km, limb_dark_u) = args
+    (idx, psi, moon_pos_wrt_earth, sun_pos_wrt_earth, obs_j2000, J2M, M2J, u_vec, moon_mean_radius_km, f_mm, mm_per_pixel, ray_step_km, coarse_factor, stop_radius_km, extra_clearance_km) = args
 
     ds = _GLOBAL_DEM_DS
     if ds is None:
@@ -501,12 +280,12 @@ def find_intersection_for_psi(args):
     x_px = radius_px * math.cos(psi)
     y_px = radius_px * math.sin(psi)
 
-    # --- Occlusion test: center ray (as before) using coarse->refine
+    # --- Occlusion test: coarse->refine ray-marching from surface toward Sun ---
     vec_sun = sun_pos - surface_abs_j2000
     dist_to_sun_km = np.linalg.norm(vec_sun)
-    sun_visible_center = True
+    sun_visible = True
     if dist_to_sun_km <= 0:
-        sun_visible_center = False
+        sun_visible = False
     else:
         sun_dir = vec_sun / dist_to_sun_km
         coarse_step = ray_step_km * coarse_factor
@@ -543,11 +322,12 @@ def find_intersection_for_psi(args):
             s += coarse_step
             if s > stop_radius_km * 2.0:
                 break
+
         if not hit_coarse:
-            sun_visible_center = True
+            sun_visible = True
         else:
             s_ref = max(ray_step_km, s - coarse_step)
-            sun_visible_center = True
+            sun_visible = True
             while True:
                 sample_pos = surface_abs_j2000 + s_ref * sun_dir
                 vec_from_moon_center = sample_pos - moon_pos
@@ -574,23 +354,13 @@ def find_intersection_for_psi(args):
                     continue
                 sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
                 if rr < (sample_local_radius_km - EPS_KM):
-                    sun_visible_center = False
+                    sun_visible = False
                     break
                 s_ref += ray_step_km
                 if s_ref > stop_radius_km * 2.0:
                     break
 
-    # --- Solar disk sampling: compute visible fraction and intensity (limb-darkened)
-    sun_vis_frac = 0.0
-    sun_intensity = 0.0
-    try:
-        sun_vis_frac, sun_intensity = _compute_solar_visible_fraction(
-            surface_abs_j2000, sun_pos, moon_pos, J2M, moon_mean_radius_km, ds, ray_step_km, stop_radius_km, n_sun_samples, R_sun_km, limb_dark_u
-        )
-    except Exception:
-        sun_vis_frac = 1.0 if sun_visible_center else 0.0
-        sun_intensity = float(sun_vis_frac)
-
+    # build output row
     row = {
         "psi_deg": float(math.degrees(psi)),
         "lat_deg": float(lat_deg),
@@ -601,14 +371,12 @@ def find_intersection_for_psi(args):
         "radius_px": float(radius_px),
         "x_px": float(x_px),
         "y_px": float(y_px),
-        "sun_visible_center": bool(sun_visible_center),
-        "sun_visible_frac": float(sun_vis_frac),
-        "sun_intensity": float(sun_intensity)
+        "sun_visible": bool(sun_visible),
     }
     return (idx, row)
 
 def main():
-    print("=== generate_moon_limb_profile_with_occlusion_and_intensity.py ===")
+    print("=== generate_moon_limb_profile_with_occlusion_patched_final.py ===")
     print("KERNEL_DIR:", KERNEL_DIR)
     print("DEM_PATH:", DEM_PATH)
     print("Time (UTC):", t_utc_iso)
@@ -692,7 +460,6 @@ def main():
 
     print("\nSampling limb with n_angles =", n_angles)
     print("Ray-marching params: ray_step_km =", ray_step_km, "coarse_factor =", coarse_factor, "stop_radius_km =", stop_radius_km)
-    print("Solar sampling:", n_sun_samples, "samples per limb point, limb-darkening u=", sun_limb_darkening_u)
 
     psis = np.linspace(0.0, 2.0 * math.pi, n_angles, endpoint=False)
 
@@ -703,7 +470,7 @@ def main():
             idx, psi, moon_pos_wrt_earth.tolist(), sun_pos_wrt_earth.tolist(),
             obs_j2000.tolist(), J2M.tolist(), M2J.tolist(), u_moon_to_obs.tolist(),
             moon_mean_radius_km, f_mm, mm_per_pixel, ray_step_km, coarse_factor,
-            stop_radius_km, extra_clearance_km, n_sun_samples, R_sun_km, sun_limb_darkening_u
+            stop_radius_km, extra_clearance_km
         ))
 
     results = [None] * n_angles
@@ -759,8 +526,8 @@ def main():
     except Exception:
         min_r = float('nan'); max_r = float('nan')
     print("Min/Max radius_px:", min_r, "/", max_r)
-    visible_frac = float(df['sun_visible_frac'].sum()) / len(df)
-    print("Mean sun-visible_frac (avg over psi):", visible_frac)
+    visible_frac = float(df['sun_visible'].sum()) / len(df)
+    print("Sun-visible fraction:", visible_frac)
     ds_local.close()
     print("Done.")
 
