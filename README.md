@@ -23,10 +23,20 @@ This will:
 Notes, caveats & tips
 =====================
 
-If you want final quality, run without --preview-n-angles and --chunk-size (or set --preview-n-angles 2048 and --chunk-size 1) Both will falback to the final hi-res defaults if not present. For fast previews use --preview-n-angles 256 to produce coarse results quickly.
+If you want final quality, run without --preview-n-angles and --chunk-size (or set --preview-n-angles 2048 and --chunk-size 1) Both will falback to the final hi-res defaults if not present.
 
 The patched heavy script still loads SPICE and the DEM per-run. Running many frames in parallel is memory intensive if you run many workers simultaneously. Start with --concurrency ≈ CPU cores − 1 (or lower if you hit memory pressure).
 
 If you prefer the heavy script to reuse a memory-mapped DEM across frames (faster), it is advised to add a server-worker mode later — but the current per-process approach is simpler and robust.
 
 The orchestration merges per-frame CSVs into one file that includes a frame column. You can later filter or summarize as you like.
+
+
+Tuning knobs cheat sheet (effects and costs)
+============================================
+- n_angles ↓ → linear speedup, but faceting on mask. Good: 64–128 for preview.
+- ray_step_km ↑ → big speedup; risk: miss small occluders/beads. For preview use 1–2 km.
+- coarse_factor ↓/↑ → affects how coarse the initial sweep is. Lowering reduces false positives but can be slower.
+- --no-multiproc ON → fewer DEM handles, less I/O; use orchestrator concurrency to control parallelism.
+- --chunk-size ↑ → huge practical speedup (DEM + SPICE init amortized); use 50–200. Makes each worker compute many frames while loading DEM once.
+- Disk on SSD / disable AV → essential. If your DEM file is on a slow drive or scanned by AV per-access, speed will be terrible.
