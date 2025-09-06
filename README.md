@@ -5,53 +5,77 @@
 Quick usage guide (recommended sequence)
 ========================================
 
-- Ensure generate_moon_limb_profile_with_occlusion.py (patched) and orchestrate_heavy_runs.py are saved in your project folder and executable with your Python environment. Ensure naif0012.tls and other kernels are present in KERNEL_DIR.
+- Ensure generate_moon_limb_profile_with_occlusion.py and orchestrate_heavy_runs.py are saved in your project folder and executable with your Python environment. Ensure naif0012.tls and other kernels are present in KERNEL_DIR.
 - Ensure you have candidate_frames.csv. Confirm it contains the expanded ranges you want.
-- Run the orchestration (example — preview with fewer samples):
 
-python orchestrate_heavy_runs.py --ae-csv eclipse_keyframes_full.csv --candidates candidate_frames.csv --heavy-script generate_moon_limb_profile_with_occlusion.py --out-root out_runs --concurrency 6 --chunk-size 20 --extra-args --preview-n-angles 256
+Step 1 — Profile & get chunk-size suggestion
+============================================
 
+Run this first. It does a short preview run and returns a suggested --chunk-size tuned to your machine.
 
-This will:
-==========
-- spawn up to 6 parallel child processes,
-- run the heavy script for each frame in the candidate expanded ranges (125..1859 plus 982..1016 frames),
-- each child writes its CSV into out_runs/frame_XXXX/moon_limb_profile.csv,
-- at the end the wrapper writes out_runs/merged_moon_limb_profile.csv combining them.
+```console
 
+python orchestrate_heavy_runs.py \
+  --ae-csv eclipse_keyframes_full.csv \
+  --candidates candidate_frames.csv \
+  --heavy-script generate_moon_limb_profile_with_occlusion.py \
+  --out-root out_runs \
+  --concurrency 3 \
+  --chunk-size 8 \
+  --auto-chunk --apply-chunk-suggestion \
+  --profile-sample-frames 3 \
+  --profile-extra-args "--preview-n-angles 128" \
+  --extra-args "--no-multiproc" \
+  --kernel-dir spice_kernels \
+  --dem-path moon_dem/GLD100.tif \
+  --verbose
+```
 
-Notes, caveats & tips
-=====================
+When this finishes it will:
 
-If you want final quality, run without --preview-n-angles (or set --preview-n-angles 2048) It will falback to the final hi-res defaults if not present.
+- print seconds_per_frame (profiling)
+- print a suggested --chunk-size (and apply it because we passed --apply-chunk-suggestion)
 
-The patched heavy script still loads SPICE and the DEM per-run. Running many frames in parallel is memory intensive if you run many workers simultaneously. Start with --concurrency ≈ CPU cores − 1 (or lower if you hit memory pressure).
+Step 2 — Final high-quality run (use suggested chunk-size S)
+============================================================
 
-If you prefer the heavy script to reuse a memory-mapped DEM across frames (faster), it is advised to add a server-worker mode later — but the current per-process approach is simpler and robust.
+Replace S with the suggested chunk-size printed after Step 1. Use slightly aggressive quality flags for production:
 
-The orchestration merges per-frame CSVs into one file that includes a frame column. You can later filter or summarize as you like.
+```console
+
+python orchestrate_heavy_runs.py \
+  --ae-csv eclipse_keyframes_full.csv \
+  --candidates candidate_frames.csv \
+  --heavy-script generate_moon_limb_profile_with_occlusion.py \
+  --out-root out_runs \
+  --concurrency 3 \
+  --chunk-size S \
+  --extra-args "--n-angles 2048 --ray-step-km 0.20 --coarse-factor 6 --no-multiproc" \
+  --kernel-dir spice_kernels \
+  --dem-path moon_dem/GLD100.tif \
+  --verbose
+```
 
 
 Top flags
 =========
 - --ae-csv [filename]
-- --candidates <candidate_frames.csv>
-- --heavy-script <path> — path to heavy script (usually generate_moon_limb_profile_with_occlusion.py)
-- --out-root <dir> — where per-frame CSVs & merged output go (default out_runs)
-- --concurrency <n> — how many chunk processes to run in parallel
-- --chunk-size <N> — frames per chunk (or let profiling suggest)
+- --candidates [candidate_frames.csv]
+- --heavy-script [path] — path to heavy script (usually generate_moon_limb_profile_with_occlusion.py)
+- --out-root [dir] — where per-frame CSVs & merged output go (default out_runs)
+- --concurrency [n] — how many chunk processes to run in parallel
+- --chunk-size [N] — frames per chunk (or let profiling suggest)
 - --kernel-dir, --dem-path, --center-metadata — passed to heavy script
-- --extra-args "<args>" — extra flags for heavy script (e.g. "--preview-n-angles 64 --no-multiproc")
+- --extra-args "[args]" — extra flags for heavy script (e.g. "--preview-n-angles --n-angles --no-multiproc --ray-step-km --coarse-factor")
 - --auto-chunk — run quick profiling to suggest a chunk size
 - --apply-chunk-suggestion — automatically apply the suggested chunk size
-- --profile-sample-frames <N> — frames used in profiling run (default 1)
-- --profile-target-chunk-seconds <sec> — desired seconds per chunk (default 1800)
-- --profile-extra-args "<args>" — profile-only extra args
-- --profile-read-mb <MB> — DEM micro-benchmark size (used for preview heuristics)
+- --profile-sample-frames [N] — frames used in profiling run (default 1)
+- --profile-target-chunk-seconds [sec] — desired seconds per chunk (default 1800)
+- --profile-extra-args "[args]" — profile-only extra args
+- --profile-read-mb [MB] — DEM micro-benchmark size (used for preview heuristics)
 - --no-merge — skip final merge step
 - --keep-going — continue despite chunk failures
 - --verbose
-
 
 Tuning knobs cheat sheet (effects and costs)
 ============================================
