@@ -2,12 +2,15 @@
 """
 generate_moon_limb_profile_with_occlusion.py
 
-Patched occlusion detection and GLD100-safe DEM sampling.
+Patched occlusion detection and GLD100-safe DEM sampling. This version accepts
+command-line arguments so it can be called repeatedly by the orchestrator.
 
 Requirements:
-  pip install spiceypy rasterio numpy pandas
+    pip install spiceypy rasterio numpy pandas
 
-Usage: edit USER CONFIGURATION block and run.
+Usage examples:
+    python generate_moon_limb_profile_with_occlusion.py --utc "2006-03-29 10:54:04.555" --out-csv out.csv
+    python generate_moon_limb_profile_with_occlusion.py --utc "2006-03-29 10:54:04.555" --out-csv out.csv --preview-n-angles 256
 """
 
 import os
@@ -15,6 +18,7 @@ import math
 import time
 import multiprocessing as mp
 from multiprocessing import get_context
+import argparse
 import numpy as np
 import pandas as pd
 import spiceypy as sp
@@ -22,15 +26,17 @@ import rasterio
 from rasterio.warp import transform as rio_transform
 import rasterio.windows
 
-# ----------------- USER CONFIGURATION -----------------
-KERNEL_DIR = r"C:\Users\SoR\Desktop\jpl_sun_eclipse_project\spice_kernels"
-DEM_PATH = r"C:\Users\SoR\Desktop\jpl_sun_eclipse_project\moon_dem\GLD100.tif"
-t_utc_iso = "2006-03-29 10:53:22.600"
-observer_lat_deg = 36.14265853184001
-observer_lon_deg = 29.576375086997015
-observer_alt_m = 2.0
-OUT_CSV = "moon_limb_profile.csv"
+# ----------------- USER CONFIGURATION (defaults) -----------------
+# These defaults are preserved for users who run the script directly without args.
+DEFAULT_KERNEL_DIR = r"C:\Users\SoR\Desktop\jpl_sun_eclipse_project\spice_kernels"
+DEFAULT_DEM_PATH = r"C:\Users\SoR\Desktop\jpl_sun_eclipse_project\moon_dem\GLD100.tif"
+DEFAULT_UTC = "2006-03-29 10:54:04.555"
+DEFAULT_OBSERVER_LAT = 36.14265853184001
+DEFAULT_OBSERVER_LON = 29.576375086997015
+DEFAULT_OBSERVER_ALT = 2.0
+DEFAULT_OUT_CSV = "moon_limb_profile.csv"
 
+# supplied kernel files (these are attempted to be loaded if present)
 KERNEL_FILES = [
     "naif0012.tls",
     "pck00010.tpc",
@@ -43,19 +49,19 @@ sensor_pixels = 4096.0
 mm_per_pixel = sensor_width_mm / sensor_pixels
 f_mm = 35.0
 
-# limb sampling
-n_angles = 2048
+# limb sampling default
+DEFAULT_N_ANGLES = 2048
 
 # ray marching (tweak these for resolution / correctness)
-ray_step_km = 0.2           # fine step (km)
-coarse_factor = 6           # coarse step = ray_step_km * coarse_factor
-extra_clearance_km = 5.0
-EPS_KM = 1e-3               # 1 meter tolerance
+DEFAULT_RAY_STEP_KM = 0.2  # fine step (km)
+DEFAULT_COARSE_FACTOR = 6  # coarse step = ray_step_km * coarse_factor
+DEFAULT_EXTRA_CLEARANCE_KM = 5.0
+EPS_KM = 1e-3  # 1 meter tolerance
 MAX_RADIUS_PX = 1e6
 
-# multiprocessing
-use_multiprocessing = True
-num_workers = max(1, min(mp.cpu_count() - 1, 11))
+# multiprocessing defaults
+DEFAULT_USE_MULTIPROC = True
+DEFAULT_NUM_WORKERS = max(1, min(mp.cpu_count() - 1, 11))
 
 # GLD100-specific geospatial limits (from USGS GLD100 metadata)
 DEM_MIN_LAT = -79.0
@@ -64,11 +70,10 @@ DEM_MIN_LON = -180.0
 DEM_MAX_LON = 180.0
 DEM_LAT_EPS = 1e-8
 
-# debugging
-DEBUG_OCCLUSION = False     # set True to print occasional per-angle occlusion debug
+# debugging flag
+DEBUG_OCCLUSION = False
+# ----------------- End defaults -----------------
 
-
-# ----------------- End user configuration -----------------
 
 def find_ephemeris_bsp(kernel_dir):
     for fn in os.listdir(kernel_dir):
@@ -81,6 +86,7 @@ def load_spice_kernels(kernel_dir, extras=None):
     loaded = []
     if extras is None:
         extras = []
+    # try preferred files first, then try any BSP/TLS in the folder
     for kg in KERNEL_FILES + extras:
         p = os.path.join(kernel_dir, kg)
         if os.path.exists(p):
@@ -96,6 +102,7 @@ def load_spice_kernels(kernel_dir, extras=None):
             loaded.append(bsp)
         except Exception:
             pass
+    # finally try to load any kernels in kernel_dir (best-effort)
     for fn in os.listdir(kernel_dir):
         if fn.lower().endswith((".tls", ".tpc", ".bsp", ".tf", ".tm")):
             p = os.path.join(kernel_dir, fn)
@@ -111,14 +118,12 @@ def load_spice_kernels(kernel_dir, extras=None):
 def dem_sample_point_ds(ds, lon_deg, lat_deg):
     """
     Bilinear sample DEM (handles wrap-around lon candidates).
-    Returns elevation in meters or nan.
-
-    GLD100 covers latitudes [-79, 79] (planetocentric). We clamp latitudes here.
+    Returns elevation in meters or nan. GLD100 covers latitudes [-79, 79] (planetocentric).
+    We clamp latitudes here.
     """
     lat_deg = float(lat_deg)
     lon_deg = float(lon_deg)
     lat_deg = max(DEM_MIN_LAT + DEM_LAT_EPS, min(DEM_MAX_LAT - DEM_LAT_EPS, lat_deg))
-
     try:
         nodata = ds.nodatavals[0]
     except Exception:
@@ -149,16 +154,12 @@ def dem_sample_point_ds(ds, lon_deg, lat_deg):
             continue
 
         col0 = int(math.floor(colf)); row0 = int(math.floor(rowf))
-        col1 = min(col0 + 1, ds.width - 1)
-        row1 = min(row0 + 1, ds.height - 1)
-        col0 = max(0, min(col0, ds.width - 1))
-        row0 = max(0, min(row0, ds.height - 1))
+        col1 = min(col0 + 1, ds.width - 1); row1 = min(row0 + 1, ds.height - 1)
+        col0 = max(0, min(col0, ds.width - 1)); row0 = max(0, min(row0, ds.height - 1))
 
         try:
-            window = rasterio.windows.Window(col_off=col0, row_off=row0,
-                                             width=(col1-col0+1), height=(row1-row0+1))
-            arr = ds.read(1, window=window, boundless=True,
-                          fill_value=(nodata if nodata is not None else np.nan))
+            window = rasterio.windows.Window(col_off=col0, row_off=row0, width=(col1-col0+1), height=(row1-row0+1))
+            arr = ds.read(1, window=window, boundless=True, fill_value=(nodata if nodata is not None else np.nan))
         except Exception:
             try:
                 v = ds.read(1, window=rasterio.windows.Window(col_off=col0, row_off=row0, width=1, height=1))
@@ -230,8 +231,8 @@ def find_intersection_for_psi(args):
     Worker: compute limb sample for a single psi angle.
     Returns (idx, row_dict).
     """
-    (idx, psi, moon_pos_wrt_earth, sun_pos_wrt_earth, obs_j2000,
-     J2M, M2J, u_vec, moon_mean_radius_km, f_mm, mm_per_pixel,
+    (idx, psi, moon_pos_wrt_earth, sun_pos_wrt_earth, obs_j2000, J2M, M2J, u_vec,
+     moon_mean_radius_km, f_mm, mm_per_pixel,
      ray_step_km, coarse_factor, stop_radius_km, extra_clearance_km) = args
 
     ds = _GLOBAL_DEM_DS
@@ -326,20 +327,16 @@ def find_intersection_for_psi(args):
     vec_sun = sun_pos - surface_abs_j2000
     dist_to_sun_km = np.linalg.norm(vec_sun)
     sun_visible = True
-
     if dist_to_sun_km <= 0:
         sun_visible = False
     else:
         sun_dir = vec_sun / dist_to_sun_km
-
         # safe sampling ranges
-        s_start = max(ray_step_km * 0.05, 1e-6)   # start very close to surface
+        s_start = max(ray_step_km * 0.05, 1e-6)  # start very close to surface
         max_s = min(dist_to_sun_km, stop_radius_km * 2.5)
-
         coarse_step = ray_step_km * coarse_factor
         if coarse_step < ray_step_km:
             coarse_step = ray_step_km
-
         hit_coarse = False
         last_safe_s = 0.0
         s = s_start
@@ -351,7 +348,6 @@ def find_intersection_for_psi(args):
             # If we're already far outside the moon, no occlusion further
             if r_km > (stop_radius_km + extra_clearance_km):
                 break
-
             # convert to moon-fixed to sample DEM
             sample_mf = J2M.dot(vec_from_moon_center)
             sx, sy, sz = float(sample_mf[0]), float(sample_mf[1]), float(sample_mf[2])
@@ -360,31 +356,25 @@ def find_intersection_for_psi(args):
                 last_safe_s = s
                 s += coarse_step
                 continue
-
             sample_lat_rad = math.asin(max(-1.0, min(1.0, sz / rr)))
             sample_lon_rad = math.atan2(sy, sx)
             sample_lat_deg = math.degrees(sample_lat_rad)
             sample_lon_deg = math.degrees(sample_lon_rad)
             if sample_lon_deg > 180.0:
                 sample_lon_deg -= 360.0
-
             # clamp sample latitude before DEM access
             sample_lat_deg = max(DEM_MIN_LAT + DEM_LAT_EPS, min(DEM_MAX_LAT - DEM_LAT_EPS, sample_lat_deg))
-
             sample_elev_m = dem_sample_point_ds(ds, sample_lon_deg, sample_lat_deg)
             if math.isnan(sample_elev_m):
                 last_safe_s = s
                 s += coarse_step
                 continue
-
             sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
-
             # If the sample point is inside the local surface radius -> there is an occluding terrain
             if rr < (sample_local_radius_km - EPS_KM):
                 hit_coarse = True
                 hit_s = s
                 break
-
             last_safe_s = s
             s += coarse_step
 
@@ -416,18 +406,15 @@ def find_intersection_for_psi(args):
                 if sample_lon_deg > 180.0:
                     sample_lon_deg -= 360.0
                 sample_lat_deg = max(DEM_MIN_LAT + DEM_LAT_EPS, min(DEM_MAX_LAT - DEM_LAT_EPS, sample_lat_deg))
-
                 sample_elev_m = dem_sample_point_ds(ds, sample_lon_deg, sample_lat_deg)
                 if math.isnan(sample_elev_m):
                     s_ref += refine_step
                     continue
                 sample_local_radius_km = float(moon_mean_radius_km + (sample_elev_m / 1000.0))
-
                 if rr < (sample_local_radius_km - EPS_KM):
                     occluded = True
                     break
                 s_ref += refine_step
-
             sun_visible = not occluded
 
     # build output row
@@ -450,7 +437,49 @@ def find_intersection_for_psi(args):
     return (idx, row)
 
 
+def parse_cli():
+    p = argparse.ArgumentParser(description="generate_moon_limb_profile_with_occlusion.py")
+    p.add_argument("--utc", dest="utc", default=DEFAULT_UTC, help="UTC time string (ISO-like).")
+    p.add_argument("--out-csv", dest="out_csv", default=DEFAULT_OUT_CSV, help="Output CSV path.")
+    p.add_argument("--n-angles", dest="n_angles", type=int, default=DEFAULT_N_ANGLES, help="Number of limb samples.")
+    p.add_argument("--preview-n-angles", dest="preview_n_angles", type=int, default=None,
+                   help="Shortcut to set a lower n_angles for fast preview runs (overrides --n-angles if provided).")
+    p.add_argument("--dem-path", dest="dem_path", default=DEFAULT_DEM_PATH, help="DEM (GLD100) path.")
+    p.add_argument("--kernel-dir", dest="kernel_dir", default=DEFAULT_KERNEL_DIR, help="SPICE kernels directory.")
+    p.add_argument("--ray-step-km", dest="ray_step_km", type=float, default=DEFAULT_RAY_STEP_KM, help="Raymarching step in km.")
+    p.add_argument("--coarse-factor", dest="coarse_factor", type=float, default=DEFAULT_COARSE_FACTOR, help="Coarse factor for raymarch.")
+    p.add_argument("--extra-clearance-km", dest="extra_clearance_km", type=float, default=DEFAULT_EXTRA_CLEARANCE_KM, help="Extra clearance radius for raymarch.")
+    p.add_argument("--n-workers", dest="n_workers", type=int, default=DEFAULT_NUM_WORKERS, help="Number of worker processes (when using multiprocessing).")
+    p.add_argument("--no-multiproc", dest="no_multiproc", action="store_true", help="Disable multiprocessing (single-threaded).")
+    p.add_argument("--observer-lat", dest="observer_lat", type=float, default=DEFAULT_OBSERVER_LAT, help="Observer latitude (deg).")
+    p.add_argument("--observer-lon", dest="observer_lon", type=float, default=DEFAULT_OBSERVER_LON, help="Observer longitude (deg).")
+    p.add_argument("--observer-alt", dest="observer_alt", type=float, default=DEFAULT_OBSERVER_ALT, help="Observer altitude (m).")
+    args = p.parse_args()
+    return args
+
+
 def main():
+    global DEBUG_OCCLUSION
+
+    args = parse_cli()
+
+    # Resolve effective parameters (CLI overrides defaults)
+    t_utc_iso = args.utc
+    OUT_CSV = args.out_csv
+    n_angles = args.n_angles
+    if args.preview_n_angles is not None:
+        n_angles = args.preview_n_angles  # preview overrides full sampling
+    DEM_PATH = args.dem_path
+    KERNEL_DIR = args.kernel_dir
+    ray_step_km = args.ray_step_km
+    coarse_factor = args.coarse_factor
+    extra_clearance_km = args.extra_clearance_km
+    use_multiprocessing = (not args.no_multiproc)
+    num_workers = max(1, args.n_workers) if use_multiprocessing else 1
+    observer_lat_deg = args.observer_lat
+    observer_lon_deg = args.observer_lon
+    observer_alt_m = args.observer_alt
+
     print("=== generate_moon_limb_profile_with_occlusion.py (patched occlusion) ===")
     print("KERNEL_DIR:", KERNEL_DIR)
     print("DEM_PATH:", DEM_PATH)
@@ -459,6 +488,7 @@ def main():
 
     if not os.path.isdir(KERNEL_DIR):
         raise RuntimeError("KERNEL_DIR not found: " + KERNEL_DIR)
+
     loaded = load_spice_kernels(KERNEL_DIR)
     print("\nSPICE kernels loaded ({}):".format(len(loaded)))
     for p in loaded:
@@ -469,11 +499,18 @@ def main():
         if fn.startswith("de") and fn.endswith(".bsp"):
             bsp_used = fn; break
     print("Ephemeris used:", bsp_used if bsp_used else "(none detected)")
-    et = sp.str2et(t_utc_iso)
+
+    # Convert UTC to ET (SPICE)
+    try:
+        et = sp.str2et(t_utc_iso)
+    except Exception as e:
+        # If str2et fails, try wrapping in more ISO-like str
+        raise RuntimeError(f"spice.str2et failed for UTC string '{t_utc_iso}': {e}")
     print("ET:", et)
 
     if not os.path.exists(DEM_PATH):
         raise RuntimeError("DEM not found: " + DEM_PATH)
+
     ds_local = rasterio.open(DEM_PATH)
     print("\nOpened DEM: size {} x {}".format(ds_local.width, ds_local.height))
     try:
@@ -487,11 +524,10 @@ def main():
     print("DEM transform:", ds_local.transform)
     print("DEM nodata:", ds_local.nodatavals)
 
-    # observer J2000
+    # observer in body-fixed converted to J2000
     try:
         _cnt, rvals = sp.bodvrd("EARTH", "RADII", 3)
-        re_km = float(rvals[0])
-        rp_km = float(min(rvals))
+        re_km = float(rvals[0]); rp_km = float(min(rvals))
     except Exception:
         re_km = 6378.137; rp_km = 6356.752
 
@@ -499,6 +535,7 @@ def main():
     lat_rad = math.radians(observer_lat_deg)
     obs_body_km = sp.georec(lon_rad, lat_rad, observer_alt_m / 1000.0, re_km, (re_km - rp_km) / re_km)
     obs_body_km = np.array(obs_body_km, dtype=float)
+
     frame_from = "ITRF93"
     try:
         xform = sp.pxform(frame_from, "J2000", et)
@@ -515,6 +552,7 @@ def main():
     vec_moon_to_obs = obs_j2000 - moon_pos_wrt_earth
     u_moon_to_obs = vec_moon_to_obs / np.linalg.norm(vec_moon_to_obs)
     dist_moon_to_obs_km = np.linalg.norm(vec_moon_to_obs)
+
     print("\nMoon center (J2000) wrt Earth (km):", moon_pos_wrt_earth)
     print("Observer (J2000) wrt Earth (km):", obs_j2000)
     print("Distance Moon->Observer (km):", dist_moon_to_obs_km)
@@ -536,22 +574,28 @@ def main():
     print("Ray-marching params: ray_step_km =", ray_step_km, "coarse_factor =", coarse_factor, "stop_radius_km =", stop_radius_km)
 
     psis = np.linspace(0.0, 2.0 * math.pi, n_angles, endpoint=False)
-
     # prepare worker args
     worker_args = []
     for idx, psi in enumerate(psis):
         worker_args.append((
             idx, psi,
-            moon_pos_wrt_earth.tolist(), sun_pos_wrt_earth.tolist(),
+            moon_pos_wrt_earth.tolist(),
+            sun_pos_wrt_earth.tolist(),
             obs_j2000.tolist(),
-            J2M.tolist(), M2J.tolist(), u_moon_to_obs.tolist(),
-            moon_mean_radius_km, f_mm, mm_per_pixel, ray_step_km, coarse_factor,
-            stop_radius_km, extra_clearance_km
+            J2M.tolist(),
+            M2J.tolist(),
+            u_moon_to_obs.tolist(),
+            moon_mean_radius_km,
+            f_mm,
+            mm_per_pixel,
+            ray_step_km,
+            coarse_factor,
+            stop_radius_km,
+            extra_clearance_km
         ))
 
     results = [None] * n_angles
     start_time = time.time()
-
     occluded_count = 0
 
     if use_multiprocessing and num_workers > 1:
@@ -583,8 +627,8 @@ def main():
         _worker_init(DEM_PATH)
         processed = 0
         last_print = time.time()
-        for args in worker_args:
-            idx, row = find_intersection_for_psi(args)
+        for args_w in worker_args:
+            idx, row = find_intersection_for_psi(args_w)
             results[idx] = row
             if not row["sun_visible"]:
                 occluded_count += 1
@@ -602,9 +646,10 @@ def main():
 
     rows_ordered = [results[i] for i in range(n_angles)]
     df = pd.DataFrame(rows_ordered)
+
+    # Write CSV to the requested output path
     df.to_csv(OUT_CSV, index=False)
     print("\nWrote", OUT_CSV)
-
     try:
         min_r = float(np.nanmin(df['radius_px']))
         max_r = float(np.nanmax(df['radius_px']))
@@ -613,7 +658,6 @@ def main():
     print("Min/Max radius_px:", min_r, "/", max_r)
     visible_frac = float(df['sun_visible'].sum()) / len(df)
     print("Sun-visible fraction:", visible_frac)
-
     ds_local.close()
     print("Done.")
 
