@@ -1,4 +1,3 @@
-========================================
 Quick usage guide (recommended sequence)
 ========================================
 
@@ -17,7 +16,6 @@ This will:
 - at the end the wrapper writes out_runs/merged_moon_limb_profile.csv combining them.
 
 
-=====================
 Notes, caveats & tips
 =====================
 
