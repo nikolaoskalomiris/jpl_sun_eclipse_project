@@ -23,7 +23,7 @@ This will:
 Notes, caveats & tips
 =====================
 
-If you want final quality, run without --preview-n-angles and --chunk-size (or set --preview-n-angles 2048 and --chunk-size 1) Both will falback to the final hi-res defaults if not present.
+If you want final quality, run without --preview-n-angles (or set --preview-n-angles 2048) It will falback to the final hi-res defaults if not present.
 
 The patched heavy script still loads SPICE and the DEM per-run. Running many frames in parallel is memory intensive if you run many workers simultaneously. Start with --concurrency ≈ CPU cores − 1 (or lower if you hit memory pressure).
 
