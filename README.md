@@ -34,7 +34,7 @@ The orchestration merges per-frame CSVs into one file that includes a frame colu
 
 Top flags
 =========
-- --ae-csv <file>
+- --ae-csv [filename]
 - --candidates <candidate_frames.csv>
 - --heavy-script <path> — path to heavy script (usually generate_moon_limb_profile_with_occlusion.py)
 - --out-root <dir> — where per-frame CSVs & merged output go (default out_runs)
