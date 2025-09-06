@@ -57,7 +57,7 @@ GeoJPEG2000 version (for its smaller filesize and ease of import in GIS
 programs).
 
 
-=======
+
 SUMMARY
 =======
 
