@@ -36,15 +36,14 @@ https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/
 WHERE TO DOWNLOAD KERNELS:
 ==========================
 
-# Leap seconds (LSK) — needed for UTC <-> ET conversion.
+Leap seconds (LSK) — needed for UTC <-> ET conversion
 wget https://naif.jpl.nasa.gov/pub/naif/generic_kernels/lsk/naif0012.tls
 
-# JPL planetary ephemeris (use DE440 as you prefer; change name to de432s/de440/de441 as you like)
-# (DE440 is current in your tests; DE432S is also fine if you prefer)
+JPL planetary ephemeris (use DE440 as you prefer; change name to de432s/de440/de441 as you like)
 wget https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440.bsp
 
-# Planetary constants kernel (text PCK) — contains body radii, etc.
+Planetary constants kernel (text PCK) — contains body radii, etc
 wget https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/pck00010.tpc
 
-# (Optional but recommended) gravitational constants / masses for consistency
+(Optional but recommended) gravitational constants / masses for consistency
 wget https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/gm_de440.tpc || true
