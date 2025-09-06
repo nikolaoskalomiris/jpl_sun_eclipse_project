@@ -32,6 +32,27 @@ If you prefer the heavy script to reuse a memory-mapped DEM across frames (faste
 The orchestration merges per-frame CSVs into one file that includes a frame column. You can later filter or summarize as you like.
 
 
+Top flags
+=========
+- --ae-csv <file>
+- --candidates <candidate_frames.csv>
+- --heavy-script <path> — path to heavy script (usually generate_moon_limb_profile_with_occlusion.py)
+- --out-root <dir> — where per-frame CSVs & merged output go (default out_runs)
+- --concurrency <n> — how many chunk processes to run in parallel
+- --chunk-size <N> — frames per chunk (or let profiling suggest)
+- --kernel-dir, --dem-path, --center-metadata — passed to heavy script
+- --extra-args "<args>" — extra flags for heavy script (e.g. "--preview-n-angles 64 --no-multiproc")
+- --auto-chunk — run quick profiling to suggest a chunk size
+- --apply-chunk-suggestion — automatically apply the suggested chunk size
+- --profile-sample-frames <N> — frames used in profiling run (default 1)
+- --profile-target-chunk-seconds <sec> — desired seconds per chunk (default 1800)
+- --profile-extra-args "<args>" — profile-only extra args
+- --profile-read-mb <MB> — DEM micro-benchmark size (used for preview heuristics)
+- --no-merge — skip final merge step
+- --keep-going — continue despite chunk failures
+- --verbose
+
+
 Tuning knobs cheat sheet (effects and costs)
 ============================================
 - n_angles ↓ → linear speedup, but faceting on mask. Good: 64–128 for preview.
