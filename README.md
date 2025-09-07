@@ -2,7 +2,7 @@
 
 **<ins>Abstract:</ins>**
 
-The concept of the project is to recreate the Total Solar Eclipse event of 29th of March 2006. Along with various places on Earth that day, Kastelorizo, a small island located in Greece, was on of the places inside the path of totality. According to NASA documentation the approximate center of totality was around `10:54:04am UTC`
+The concept of the project is to create a simulation of the Total Solar Eclipse event taking place at 29th of March 2006 as if it is being observed and recorded from Earth. Along with various places on Earth that day, Kastelorizo, which is a small island located in Greece, was one of the places inside the path of totality. According to NASA documentation the approximate center of totality was around `10:54:04am UTC.` We will gather all the necessary data of the path that each celestial body takes, and import each specific frame in After Effects with a JSX importer. Every other aspect of the bodies will be designed with `Red Giant Trapcode Particular` and `Red Giant Geo.` (Described below)
 
 **<ins>We will split the procedure in parts:</ins>**
 
@@ -13,7 +13,7 @@ The concept of the project is to recreate the Total Solar Eclipse event of 29th 
 - CMEs
 - Corona
 
-This repository will cover the creation of the Baily's Beads and the creation of the Diamond Ring with the help of AstroPy and SPICE tools.
+This repository will cover the creation of the Baily's Beads and the Diamond Ring, as well as the direction/angle/size with the help of AstroPy and SPICE tools.
 
 **<ins>Tools we will need:</ins>**
 
@@ -31,7 +31,7 @@ This repository will cover the creation of the Baily's Beads and the creation of
 
 Run this first. It does a short preview run and returns a suggested `--chunk-size` tuned to your machine.
 
-```console
+```bash
 
 python orchestrate_heavy_runs.py \
   --ae-csv eclipse_keyframes_full.csv \
@@ -58,7 +58,7 @@ When this finishes it will:
 
 Replace S with the suggested chunk-size printed after Step 1. Use slightly aggressive quality flags for production:
 
-```console
+```bash
 
 python orchestrate_heavy_runs.py \
   --ae-csv eclipse_keyframes_full.csv \
@@ -102,3 +102,5 @@ python orchestrate_heavy_runs.py \
 - `--no-multiproc ON` → fewer DEM handles, less I/O; use orchestrator concurrency to control parallelism.
 - `--chunk-size` ↑ → huge practical speedup (DEM + SPICE init amortized); use 50–200. Makes each worker compute many frames while loading DEM once.
 - Disk on SSD / disable AV → essential. If your DEM file is on a slow drive or scanned by AV per-access, speed will be terrible.
+
+#TO_DO: Expand ReadMe
