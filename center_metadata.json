@@ -1,0 +1,12 @@
+{
+  "center_utc": "2006-03-29 10:54:04.555",
+  "center_et": 196901709.74071687,
+  "half_window_s": 5400.0,
+  "real_duration_s": 10800.0,
+  "frames": 2000,
+  "fps": 25.0,
+  "time_compression": 135.0,
+  "ae_center_frame": 1000,
+  "center_row_index": 999,
+  "center_row_time_s_center": -2.7013506753373804
+}

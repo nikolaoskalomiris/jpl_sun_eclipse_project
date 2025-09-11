@@ -1,0 +1,232 @@
+{
+  "project_name": "jpl_sun_eclipse_project",
+  "purpose": "Produce VFX-accurate lunar limb occlusion masks / profiles for a solar eclipse timeline optimized for After Effects (2000 frames, 25fps timeline compressed from many hours).",
+  "high_level_pipeline": [
+    "generate_eclipse_csv.py -> produce eclipse_keyframes_full.csv (keyframe timing & geometry)",
+    "select_eclipse_frames_from_ae.py -> map AE frames to UTC and select candidate frames (partial/total)",
+    "orchestrate_heavy_runs.py -> orchestrate heavy compute across candidate frames, spawn generate_moon_limb_profile_with_occlusion.py tasks in chunks (concurrency/chunk-size)",
+    "generate_moon_limb_profile_with_occlusion.py -> heavy per-frame limb profiling (n_angles, ray-marching, DEM sampling, occlusion), output per-frame CSVs",
+    "merge per-frame CSVs -> merged_moon_limb_profile.csv",
+    "post-processing -> convert merged CSV -> per-frame PNG masks or AE assets"
+  ],
+  "project_metadata": {
+    "timeline_frames": 2000,
+    "fps": 25,
+    "real_duration_s": 10800,
+    "ae_center_frame": 1000,
+    "time_compression": 135.0,
+    "center_utc_final": "2006-03-29 10:54:04.555",
+    "center_et_final": 196901709.74071687
+  },
+  "environment_and_system": {
+    "os": "Windows 11 (user)",
+    "python": "3.12.10 (user downgraded from 3.13 -> 3.12.10)",
+    "key_packages": {
+      "spiceypy": "6.0.3",
+      "numpy": "2.2.6",
+      "numba": "0.61.2",
+      "llvmlite": "0.44.0",
+      "rasterio": "user-installed (required)",
+      "pandas": "user-installed (used by other scripts)"
+    },
+    "GPU": {
+      "device": "NVIDIA RTX 4060",
+      "driver_version": "581.29",
+      "cuda_runtime": "13.0",
+      "nvcc": "13.0",
+      "numba_cuda_status": {
+        "cuda.is_available": false,
+        "cuda.detect": "found devices (lists device), but low-level allocation/context sometimes fails with access violation",
+        "problem_summary": "numba sees device but cannot create safe device context/allocate (OSError access violation). Requires driver/runtime/numba compatibility troubleshooting."
+      }
+    },
+    "hardware": {
+      "cpu": "Intel Core 11th Gen i5-11400 (6 cores, 12 threads)",
+      "ram": "128 GB",
+      "ssd": "Samsung 980 Pro 500GB"
+    }
+  },
+  "important_input_files_and_gists": {
+    "eclipse_keyframes_full.csv_gist": "https://gist.github.com/nikolaoskalomiris/793da350d13bdc51af058404bdca2623",
+    "frame_summary_gist": "https://gist.github.com/nikolaoskalomiris/6d2ab71a9dbae30b90b2199ac4a4592c",
+    "moon_limb_profile_gist": "https://gist.github.com/nikolaoskalomiris/8037390d53eab7ca88132b603653e40a",
+    "console_output_gist": "https://gist.github.com/nikolaoskalomiris/14ee379f1e15f924bf581ccce3892d93",
+    "geometry_diag_gist": "https://gist.github.com/nikolaoskalomiris/94bb2d8acfec37ed31d66cf2106331ab",
+    "generate_eclipse_csv_py_gist": "https://gist.github.com/nikolaoskalomiris/5bf157b34807e803901087f7b266bce7",
+    "select_eclipse_frames_from_ae_py_gist": "https://gist.github.com/nikolaoskalomiris/25208cd56f7310172b55fb5bd9a43482",
+    "generate_moon_limb_profile_with_occlusion_py_gist_versions": [
+      "original heavy script (multiple versions): https://gist.github.com/nikolaoskalomiris/7ceff76410e3d20a1a62d7cd87fa42ee",
+      "patched threadpool version earlier provided by assistant (in conversation)"
+    ],
+    "center_metadata_json_gist": "https://gist.github.com/nikolaoskalomiris/b8b93c82052fdbb9cb30fee24f67f71e"
+  },
+  "major_issues_observed": [
+    {
+      "id": "A",
+      "symptom": "fraction_visible_sphere stuck at 0.5 and fraction_fully_visible constant at 0 in frame_summary",
+      "diagnosis": "AE CSV mapping / center ET mismatch and/or topocentric vs geocentric geometry. Also early SPICE kernel load ordering missing TLS caused str2et/leapsecond errors.",
+      "actions": [
+        "Found different refined center ET values between generate_eclipse_csv.py and SPICE-based golden-section refine in new scripts.",
+        "Fixed by running SPICE furnsh with correct TLS and BSP and using topocentric observer coords (Kastellorizo)."
+      ]
+    },
+    {
+      "id": "B",
+      "symptom": "SpiceNOLEAPSECONDS: str2et failing (leapseconds kernel missing)",
+      "diagnosis": "Leapsecond file (.tls) not loaded before calling sp.str2et",
+      "actions": [
+        "Implemented furnsh_kernels_dir to load TLS first, then PCK/TPC/TF, then BSPs."
+      ]
+    },
+    {
+      "id": "C",
+      "symptom": "orchestrate_heavy_runs.py pickling error when using multiprocessing Pool and local inner function run_task",
+      "diagnosis": "multiprocessing on Windows can't pickle nested functions",
+      "actions": [
+        "Refactored to ensure run_task is defined at top level (or use multiprocessing.Pool.map with module-level function) — user later switched to threading or used chunk mode with concurrency and simple subprocess runs."
+      ]
+    },
+    {
+      "id": "D",
+      "symptom": "generate_moon_limb_profile_with_occlusion.py initial heavy script not accepting extra args (--preview-n-angles) or frame-start/--frame-end",
+      "diagnosis": "CLI argument mismatches across versions",
+      "actions": [
+        "Patched heavy script to unify CLI, added missing flags, added --debug-try-invert and --use-gpu flags."
+      ]
+    },
+    {
+      "id": "E",
+      "symptom": "Numba/cuda recognition: cuda.is_available() False even though cuda.detect() lists device; low-level allocations cause access violation",
+      "diagnosis": "Numba runtime/driver context mismatch or WDDM vs context constraints; sometimes caused by missing Visual Studio build tools or required lib mismatch for numba/llvmlite/driver binding.",
+      "actions": [
+        "Installed Visual Studio 2022, reinstalled CUDA toolkit v13.0, ran deviceQuery (PASS).",
+        "Used custom numba probe scripts to collect diagnostics. Some probes show device, but `cuda.is_available()` remains False and attempts at device allocation raise OSError access violation for context creation.",
+        "Suggestion: ensure numba/llvmlite compiled versions are compatible with CUDA runtime, ensure the Numba driver supports the OS driver model (WDDM), and check for leftover processes holding the device. The user built CUDA samples and confirmed device via deviceQuery."
+      ]
+    },
+    {
+      "id": "F",
+      "symptom": "orchestrator produced highly variable per-frame times; initial chunk fast then slowdown (huge time deltas between file writes)",
+      "diagnosis": "Task scheduling strategy caused bursts and gaps (large chunk size with complex I/O), Windows context switching, antivirus (MsMpEng) and other processes interfering, and potential resource exhaustion/unbalanced thread pool behavior.",
+      "actions": [
+        "Switched heavy script to use ThreadPoolExecutor instead of multiprocessing for per-psi work to keep DEM open per chunk and reduce process spawn overhead.",
+        "User observed improvements when setting high concurrency and chunk-size tuned; best practice: smaller chunk size (e.g., 1–8) with concurrency tuned to CPU/DEM characteristics, or use auto-chunk profiling to match target chunk runtime."
+      ]
+    }
+  ],
+  "files_changed_or_created_by_patches": [
+    {
+      "path": "generate_moon_limb_profile_with_occlusion.py",
+      "change_summary": "Patched to add deterministic SPICE kernel loader, probe_numba_gpu(), ThreadPoolExecutor per-angle workers, CLI flags (--use-gpu, --debug-try-invert), improved logging, fallback behavior to CPU if GPU probe fails.",
+      "gist_reference": "assistant provided full patched file in conversation (copy saved locally by user); original versions at https://gist.github.com/nikolaoskalomiris/7ceff76410e3d20a1a62d7cd87fa42ee"
+    },
+    {
+      "path": "orchestrate_heavy_runs.py",
+      "change_summary": "Patched to call heavy script in chunked frame-range mode using --frame-start/--frame-end, added auto-profiling sub-run to suggest chunk-size, improved argument handling for --extra-args and Windows quoting issues, added estimate of expected runtime per task.",
+      "notes": "Fixes for multiprocessing pickling issues were discussed; orchestrator now runs subprocesses and uses ThreadPool/worker subprocesses rather than passing functions via Pool on Windows."
+    },
+    {
+      "path": "generate_eclipse_csv.py",
+      "change_summary": "Patched to ensure SPICE-based golden-section refinement is run with chosen observer (Kastellorizo) and to print final center_et and UTC. Also set AE mapping and verify time_s -> AE frame mapping; warning for mismatch when CSV 'mapped center row != ae_center_frame'.",
+      "gist_reference": "https://gist.github.com/nikolaoskalomiris/5bf157b34807e803901087f7b266bce7"
+    },
+    {
+      "path": "select_eclipse_frames_from_ae.py",
+      "change_summary": "Patched to accept updated AE CSV time column names (time_s, time_s_center), to robustly parse contacts.csv and handle multiple formats, and to emit candidate_frames.csv. Added helpful warnings about mapping failures and fallback heuristics.",
+      "notes": "Fixed pandas parsing issues and key lookups for 'center' contact."
+    }
+  ],
+  "representative_commands_run": [
+    "python generate_eclipse_csv.py --kernel-dir spice_kernels",
+    "python select_eclipse_frames_from_ae.py --ae-csv eclipse_keyframes_full.csv --contacts contacts.csv",
+    "python orchestrate_heavy_runs.py --ae-csv eclipse_keyframes_full.csv --candidates candidate_frames.csv --heavy-script generate_moon_limb_profile_with_occlusion.py --out-root out_runs --concurrency 6 --chunk-size 8 --extra-args \"--no-multiproc\" --kernel-dir spice_kernels --dem-path moon_dem/GLD100.tif --verbose",
+    "python generate_moon_limb_profile_with_occlusion.py --frame-start 982 --frame-end 1018 --ae-csv eclipse_keyframes_full_with_utc.csv --center-metadata center_metadata.json --out-dir out_runs --kernel-dir spice_kernels --dem-path moon_dem/GLD100.tif --n-workers 12 --no-multiproc",
+    "python generate_moon_limb_profile_with_occlusion.py --utc \"2006-03-29 10:54:04.555\" --out-csv tmp_test.csv --kernel-dir spice_kernels --dem-path moon_dem/GLD100.tif --preview-n-angles 128 --use-gpu --verbose"
+  ],
+  "key_console_snippets_and_meanings": {
+    "fraction_visible_constant": "frame_summary rows show fraction_visible_sphere=0.5 for frames around center — indicated that the spherical-only visibility test or sample mapping was not producing correct occlusion.",
+    "any_possible_false": "Geometry tests showed any_possible False across the sampled window until refining center ET; indicated angle_sun_vs_u_deg extremely close to 180 deg and angular separation small but not zero — needed more accurate refine or topocentric observer.",
+    "spice_no_leapseconds": "spiceypy.exceptions.SpiceNOLEAPSECONDS errors were due to TLS not being loaded prior to str2et calls.",
+    "numba_probe": "numba.cuda.gpus listed devices but cuda.is_available() False and device allocations raised access violations. Diagnostics indicate driver/runtime/numba mismatch or process/context problems."
+  },
+  "merged_moon_limb_profile.csv": {
+    "user_uploaded_local_path": "/mnt/data/merged_moon_limb_profile.csv",
+    "user_size_mb": 71,
+    "notes": "User has produced merged CSV with n_angles=256 and ray_step_km=1 (preview), asked assistant to inspect. File uploaded to conversation. The new assistant can open and check for consistency."
+  },
+  "what_has_been_fixed_already": [
+    "TLS load order (furnsh_kernels_dir) to fix leapseconds errors",
+    "generate_eclipse_csv.py patched to run SPICE-based golden-section refinement with topocentric observer and wrote final center ET",
+    "generate_moon_limb_profile_with_occlusion.py patched to threading model and improved CLI; added probe_numba_gpu()",
+    "orchestrator updated to use --frame-start/--frame-end chunk invocation and to profile auto-chunk suggestions"
+  ],
+  "open_remaining_issues": [
+    {
+      "id": "G",
+      "title": "Numba/CUDA low-level context creation error (device allocations fail with access violation)",
+      "details": "numba.cuda.detect prints devices but cuda.is_available() False and device_array fails with OSError access violation. This prevents using --use-gpu path.",
+      "recommended_next_steps": [
+        "Ensure Numba + llvmlite prebuilt wheel is compatible with installed CUDA (CUDA 13.0). Confirm numba release supports CUDA 13.0.",
+        "Verify the system environment: PATH includes CUDA bin and library paths; ensure correct Microsoft Visual C++ redistributable and Visual Studio components installed.",
+        "Try running a minimal CUDA Python/Numba example that does context creation and small allocation (the user ran deviceQuery and CUDA samples PASS; next step: ensure Python process has access to nvcuda and driver).",
+        "If access violation persists, recreate a clean virtualenv, install matching numba/llvmlite builds (or conda environment where numba cuda usually works out-of-the-box)."
+      ]
+    },
+    {
+      "id": "H",
+      "title": "Slow long-run performance variability in orchestrator",
+      "details": "User observed stable ~40s/frame for some time and then intermittent huge delays (minutes-to-hours). Possibly caused by chunk ordering, resource contention (AV scans), or orchestrator rebalancing.",
+      "recommended_next_steps": [
+        "Use small chunk-size and high concurrency when CPU bound and DEM fits in memory; or increase chunk-size if per-chunk overhead dominates. Use auto-chunk profiling to pick target chunk time (~30 minutes) then override with apply-chunk-suggestion if desired.",
+        "Pin processes to CPUs / reduce background processes (turn off AV or set exclusions for project folder).",
+        "Use monitoring: log per-task durations and stdout/stderr for slow tasks; examine corresponding task logs to identify long steps (e.g., DEM reads, spice queries, numba allocations)."
+      ]
+    }
+  ],
+  "recommended_resume_instructions_for_next_assistant (step_by_step)": [
+    "1) Make a copy of the repository and backup all CSVs and logs.",
+    "2) Confirm Python 3.12.10 environment with required packages (spiceypy, numpy, rasterio, pandas, numba, llvmlite). Use pip freeze to save package list.",
+    "3) Verify SPICE kernel directory (spice_kernels) contains: naif0012.tls, pck00010.tpc, earth_assoc_itrf93.tf (.tf), gm_de440.tpc, de440*.bsp files. Use furnsh_kernels_dir() to furnsh kernels in the correct order TLS->PCK/TF->BSP.",
+    "4) Run generate_eclipse_csv.py with --kernel-dir spice_kernels to re-generate eclipse_keyframes_full.csv and confirm final 'Refined center UTC' matches expected center. Check console output for 'Refined center UTC'.",
+    "5) Run select_eclipse_frames_from_ae.py with AE CSV (eclipse_keyframes_full_with_utc.csv) and contacts.csv to produce candidate_frames.csv. Verify frame mapping warnings; fix if needed.",
+    "6) Run a single-frame preview of generate_moon_limb_profile_with_occlusion.py (threaded path) with small --preview-n-angles (128) and verify output per-frame CSV (frame_xxx_limb.csv) and sun_visible fractions around expected frames 982..1018. Use --verbose. Example:",
+    "   python generate_moon_limb_profile_with_occlusion.py --frame-start 982 --frame-end 982 --ae-csv eclipse_keyframes_full_with_utc.csv --out-dir out_runs --kernel-dir spice_kernels --dem-path moon_dem/GLD100.tif --preview-n-angles 128 --no-multiproc --verbose",
+    "7) If planning GPU acceleration, run the included probe_numba_gpu() snippet and collect output; if it shows device but allocations fail, try using a clean conda environment with a numba build matched to local CUDA runtime, or confirm driver/toolkit compatibility.",
+    "8) Use orchestrate_heavy_runs.py with --auto-chunk profiling mode to suggest chunk-size but override for faster turnaround (smaller chunk size + higher concurrency), test with --extra-args=\"--no-multiproc --n-workers <threads>\" and small chunks to verify stable throughput.",
+    "9) Once per-frame CSVs are produced for preview resolution, run a full-quality orchestrated run with n_angles=2048 and ray_step_km=0.2, tuned chunk-size and concurrency based on profiling results and observed time/frame.",
+    "10) Merge per-frame CSVs into merged_moon_limb_profile.csv and run conversion to PNG masks (helper script recommended)."
+  ],
+  "helpful_snippets_for_next_assistant": {
+    "probe_numba_gpu_python_snippet": "def probe_numba_gpu(verbose=False): ... (see patch in generate_moon_limb_profile_with_occlusion.py) -- call this early and print result",
+    "deterministic_furnsh_loader_snippet": "def furnsh_kernels_dir(kernel_dir, extras=None, verbose=False): ... (loads TLS first, then PCK/TF/TPC, then BSPs)",
+    "quick_single_frame_run": "python generate_moon_limb_profile_with_occlusion.py --utc \"2006-03-29 10:54:04.555\" --out-csv tmp.csv --kernel-dir spice_kernels --dem-path moon_dem/GLD100.tif --preview-n-angles 128 --no-multiproc --verbose"
+  },
+  "README_skeleton_for_repo": {
+    "title": "JPL Sun Eclipse Project",
+    "usage": [
+      "1. Prepare SPICE kernels in `spice_kernels/` (TLS, PCK, BSP, relevant TF files).",
+      "2. Run `python generate_eclipse_csv.py --kernel-dir spice_kernels` to generate eclipse_keyframes_full.csv.",
+      "3. Map AE frames: `python select_eclipse_frames_from_ae.py --ae-csv eclipse_keyframes_full.csv --contacts contacts.csv` to get candidate_frames.csv.",
+      "4. Profile and run heavy tasks: Use `orchestrate_heavy_runs.py` to produce per-frame limb CSVs. Example preview:",
+      "   python orchestrate_heavy_runs.py --ae-csv eclipse_keyframes_full_with_utc.csv --candidates candidate_frames.csv --heavy-script generate_moon_limb_profile_with_occlusion.py --out-root out_runs --concurrency 4 --chunk-size 1 --extra-args=\"--no-multiproc --n-workers 4 --kernel-dir spice_kernels --dem-path moon_dem/GLD100.tif\" --verbose",
+      "5. Merge outputs: merge per-frame CSVs to `merged_moon_limb_profile.csv`.",
+      "6. Convert merged CSV -> per-frame PNG masks using helper script (not included here)."
+    ],
+    "flags_reference": {
+      "--ae-csv": "AE CSV path created by generate_eclipse_csv.py",
+      "--candidates": "candidate_frames.csv produced by select_eclipse_frames_from_ae.py",
+      "--heavy-script": "path to heavy script, typically generate_moon_limb_profile_with_occlusion.py",
+      "--out-root": "output directory for per-frame CSVs",
+      "--concurrency": "how many subprocesses to run concurrently (orchestrator)",
+      "--chunk-size": "frames per subprocess chunk",
+      "--preview-n-angles": "low-res sampling for quick preview",
+      "--n-angles": "full sampling resolution for final render (e.g. 2048)",
+      "--ray-step-km": "ray-march step size (smaller => slower/higher fidelity)"
+    }
+  },
+  "final_notes": [
+    "This JSON snapshot contains: project context, file/gist references, environment state, observed issues and their current status, patches applied, and precise resume & debug instructions.",
+    "If you want, I can also export this to a markdown README or break it into smaller JSON files (environment.json, tasks.json, logs.json).",
+    "To continue work seamlessly in another chat/assistant: paste this JSON into the new chat, point it to the local repo path, and start by executing the single-frame preview and numba probe steps (they will validate environment)."
+  ]
+}
